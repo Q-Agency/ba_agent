@@ -57,11 +57,13 @@ class StartSessionRequest(BaseModel):
     taskTitle: str
     taskDescription: str = ""
     projectName: str
+    model: str = "claude-sonnet-4-6"
 
 
 class SendMessageRequest(BaseModel):
     sessionId: str
     content: str
+    model: str = "claude-sonnet-4-6"
 
 
 class GetSessionRequest(BaseModel):
@@ -90,3 +92,13 @@ class MessagesResponse(BaseModel):
 
 class ReviewResponse(BaseModel):
     status: Literal["approved", "revision_requested"]
+
+
+class ModelInfo(BaseModel):
+    id: str
+    label: str
+    provider: str
+
+
+class ModelsResponse(BaseModel):
+    models: list[ModelInfo]

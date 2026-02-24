@@ -14,6 +14,9 @@ from typing import Any, Literal
 
 from langchain_anthropic import ChatAnthropic
 from langchain_core.messages import AIMessage, SystemMessage, ToolMessage
+from langchain_core.runnables import RunnableConfig
+from langchain_google_genai import ChatGoogleGenerativeAI
+from langchain_openai import ChatOpenAI
 
 from app.config import settings
 from app.graph.prompts import build_system_prompt
@@ -30,12 +33,74 @@ _EXECUTABLE_TOOLS = {
     "search_gdrive": search_gdrive,
 }
 
-# Initialise the model with all tools bound
-_llm = ChatAnthropic(
-    model=settings.anthropic_model,
-    anthropic_api_key=settings.anthropic_api_key,
-    max_tokens=8192,
-).bind_tools(AGENT_TOOLS)
+# ---------------------------------------------------------------------------
+# Model registry & factory
+# ---------------------------------------------------------------------------
+
+MODEL_REGISTRY: dict[str, dict[str, str]] = {
+    "claude-sonnet-4-6": {
+        "provider": "anthropic",
+        "model": "claude-sonnet-4-6",
+        "label": "Claude Sonnet 4.6",
+    },
+    "claude-haiku-4-5": {
+        "provider": "anthropic",
+        "model": "claude-haiku-4-5-20251001",
+        "label": "Claude Haiku 4.5",
+    },
+    "qwen3-coder-next": {
+        "provider": "openai_compatible",
+        "model": "qwen3-coder-next-fp8",
+        "label": "Qwen 3 Coder (Local)",
+    },
+    "gemini-2.5-flash": {
+        "provider": "google",
+        "model": "gemini-2.5-flash",
+        "label": "Gemini 2.5 Flash",
+    },
+}
+
+DEFAULT_MODEL = "claude-sonnet-4-6"
+
+# Cache LLM instances so we don't re-create them on every call
+_llm_cache: dict[str, Any] = {}
+
+
+def get_llm(model_id: str):
+    """Return a cached LLM instance (with tools bound) for the given model_id."""
+    if model_id in _llm_cache:
+        return _llm_cache[model_id]
+
+    entry = MODEL_REGISTRY.get(model_id)
+    if entry is None:
+        logger.warning("Unknown model_id %r, falling back to %s", model_id, DEFAULT_MODEL)
+        entry = MODEL_REGISTRY[DEFAULT_MODEL]
+        model_id = DEFAULT_MODEL
+
+    if entry["provider"] == "anthropic":
+        llm = ChatAnthropic(
+            model=entry["model"],
+            anthropic_api_key=settings.anthropic_api_key,
+            max_tokens=8192,
+        ).bind_tools(AGENT_TOOLS)
+    elif entry["provider"] == "openai_compatible":
+        llm = ChatOpenAI(
+            model=entry["model"],
+            api_key=settings.openai_api_key,
+            base_url=settings.openai_base_url,
+            max_tokens=8192,
+        ).bind_tools(AGENT_TOOLS)
+    elif entry["provider"] == "google":
+        llm = ChatGoogleGenerativeAI(
+            model=entry["model"],
+            google_api_key=settings.google_api_key,
+            max_output_tokens=8192,
+        ).bind_tools(AGENT_TOOLS)
+    else:
+        raise ValueError(f"Unknown provider: {entry['provider']}")
+
+    _llm_cache[model_id] = llm
+    return llm
 
 
 def _patch_dangling_tool_calls(messages: list) -> list:
@@ -63,12 +128,15 @@ def _patch_dangling_tool_calls(messages: list) -> list:
     return result
 
 
-async def agent_node(state: AgentState) -> dict:
+async def agent_node(state: AgentState, config: RunnableConfig) -> dict:
     """Call the LLM with the current conversation + dynamic system prompt."""
+    model_id = config.get("configurable", {}).get("model_id", DEFAULT_MODEL)
+    llm = get_llm(model_id)
+
     system_prompt = build_system_prompt(state)
     messages = _patch_dangling_tool_calls(list(state["messages"]))
     messages_with_system = [SystemMessage(content=system_prompt)] + messages
-    response: AIMessage = await _llm.ainvoke(messages_with_system)
+    response: AIMessage = await llm.ainvoke(messages_with_system)
     return {"messages": [response]}
 
 

@@ -8,6 +8,13 @@ class Settings(BaseSettings):
     anthropic_api_key: str
     anthropic_model: str = "claude-sonnet-4-6"
 
+    # OpenAI-compatible (vLLM local models)
+    openai_base_url: str = ""
+    openai_api_key: str = "dummy"
+
+    # Google Gemini (optional)
+    google_api_key: str = ""
+
     # Database (PostgreSQL — shared with n8n)
     database_url: str
 

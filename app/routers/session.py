@@ -5,6 +5,7 @@ POST /session/start    → create session, run first agent turn, return initial 
 POST /session/message  → continue conversation, return new agent messages
 POST /session/get      → fetch session + full message history from DB
 POST /session/review   → approve or request changes on a generated SPEC
+GET  /models           → list available LLM models
 """
 from __future__ import annotations
 
@@ -19,12 +20,15 @@ from langchain_core.messages import HumanMessage
 
 from app import database as db
 from app.graph.graph import build_graph, extract_finalize_args
+from app.graph.nodes import MODEL_REGISTRY, DEFAULT_MODEL
 from app.graph.state import DEFAULT_COMPLETENESS, AgentState
 from app.schemas.api import (
     CompletenessMap,
     GetSessionRequest,
     Message,
     MessagesResponse,
+    ModelInfo,
+    ModelsResponse,
     ReviewRequest,
     ReviewResponse,
     SendMessageRequest,
@@ -47,9 +51,9 @@ def _graph(request: Request):
     return request.app.state.graph
 
 
-def _make_config(session_id: str) -> dict:
+def _make_config(session_id: str, model_id: str = DEFAULT_MODEL) -> dict:
     """LangGraph config for a session — thread_id drives checkpointing."""
-    return {"configurable": {"thread_id": session_id}}
+    return {"configurable": {"thread_id": session_id, "model_id": model_id}}
 
 
 def _db_row_to_session(row: dict) -> Session:
@@ -88,6 +92,7 @@ async def _run_agent_turn(
     session_id: str,
     input_messages: list,
     initial_state: dict | None = None,
+    model_id: str = DEFAULT_MODEL,
 ) -> tuple[list[dict], dict]:
     """
     Run one agent turn. Returns (frontend_messages, updates_dict).
@@ -95,7 +100,7 @@ async def _run_agent_turn(
     - initial_state: provided only on session start (sets session metadata)
     - subsequent turns just pass new messages; LangGraph resumes from checkpoint
     """
-    config = _make_config(session_id)
+    config = _make_config(session_id, model_id)
 
     graph_input: dict = {"messages": input_messages}
     if initial_state:
@@ -109,26 +114,57 @@ async def _run_agent_turn(
         # Fallback: agent returned plain text without calling finalize_turn
         last_msg = final_state["messages"][-1]
         text = getattr(last_msg, "content", str(last_msg))
+        logger.info("Model did not call finalize_turn — using plain text fallback")
         finalize_args = {
             "messages": [{"content_type": "text", "content": text, "citations": []}],
             "completeness": None,
             "decisions": [],
             "spec_md": None,
         }
+    else:
+        logger.info("finalize_turn args: %s", json.dumps(finalize_args, default=str)[:2000])
 
-    raw_messages: list[dict] = finalize_args.get("messages", [])
-    new_completeness: dict | None = finalize_args.get("completeness")
-    decisions: list = finalize_args.get("decisions") or []
-    spec_md: str | None = finalize_args.get("spec_md")
+    raw_messages = finalize_args.get("messages", [])
+    new_completeness = finalize_args.get("completeness")
+    decisions = finalize_args.get("decisions") or []
+    spec_md = finalize_args.get("spec_md")
+
+    # Some models (e.g. Qwen via vLLM) return tool args as JSON strings — parse them
+    if isinstance(raw_messages, str):
+        try:
+            raw_messages = json.loads(raw_messages)
+        except (json.JSONDecodeError, TypeError):
+            raw_messages = [{"content_type": "text", "content": raw_messages, "citations": []}]
+    if isinstance(decisions, str):
+        try:
+            decisions = json.loads(decisions)
+        except (json.JSONDecodeError, TypeError):
+            decisions = []
+    if isinstance(spec_md, str) and spec_md.startswith("{"):
+        # spec_md should be plain markdown, not JSON — leave it as-is unless it's a JSON wrapper
+        try:
+            parsed = json.loads(spec_md)
+            if isinstance(parsed, str):
+                spec_md = parsed
+        except (json.JSONDecodeError, TypeError):
+            pass
+    if isinstance(new_completeness, str):
+        try:
+            new_completeness = json.loads(new_completeness)
+        except (json.JSONDecodeError, TypeError):
+            logger.warning("Could not parse completeness string: %r", new_completeness)
+            new_completeness = None
 
     # Use agent's full completeness map if provided, else keep current state
     current_completeness = dict(final_state.get("completeness") or DEFAULT_COMPLETENESS)
-    if new_completeness:
+    if isinstance(new_completeness, dict):
         for key in current_completeness:
             if key in new_completeness:
                 val = new_completeness[key]
-                if isinstance(val, (int, float)):
+                try:
                     current_completeness[key] = max(0, min(100, int(val)))
+                except (ValueError, TypeError):
+                    logger.warning("Could not parse completeness value %r for %s", val, key)
 
     # Fall back to previous spec_md if agent omitted it
     if spec_md is None:
@@ -163,6 +199,21 @@ async def _persist_agent_messages(
         )
         result.append(_db_row_to_message(row))
     return result
+
+
+# ---------------------------------------------------------------------------
+# GET /models
+# ---------------------------------------------------------------------------
+
+
+@router.get("/models", response_model=ModelsResponse)
+async def list_models():
+    """Return all available LLM models."""
+    models = [
+        ModelInfo(id=mid, label=entry["label"], provider=entry["provider"])
+        for mid, entry in MODEL_REGISTRY.items()
+    ]
+    return ModelsResponse(models=models)
 
 
 # ---------------------------------------------------------------------------
@@ -212,7 +263,7 @@ async def start_session(body: StartSessionRequest, request: Request):
     # 3. Run agent
     graph = _graph(request)
     raw_messages, updates = await _run_agent_turn(
-        graph, session_id, [trigger_message], initial_state
+        graph, session_id, [trigger_message], initial_state, model_id=body.model
     )
 
     # 4. Persist agent messages + update session
@@ -255,7 +306,7 @@ async def send_message(body: SendMessageRequest, request: Request):
     graph = _graph(request)
     user_msg = HumanMessage(content=body.content)
     raw_messages, updates = await _run_agent_turn(
-        graph, body.sessionId, [user_msg]
+        graph, body.sessionId, [user_msg], model_id=body.model
     )
 
     # 3. Persist agent messages + update session
