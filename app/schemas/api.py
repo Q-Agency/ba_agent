@@ -74,6 +74,7 @@ class ReviewRequest(BaseModel):
     sessionId: str
     action: Literal["approve", "request_changes"]
     feedback: str | None = None
+    model: str = "claude-sonnet-4-6"
 
 
 # ---------------------------------------------------------------------------

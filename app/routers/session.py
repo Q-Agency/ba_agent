@@ -392,7 +392,7 @@ async def review_session(body: ReviewRequest, request: Request):
             content=f"[REVISION REQUESTED] {body.feedback}\nPlease update the SPEC accordingly."
         )
         raw_messages, updates = await _run_agent_turn(
-            graph, body.sessionId, [feedback_msg]
+            graph, body.sessionId, [feedback_msg], model_id=body.model
         )
         messages = await _persist_agent_messages(body.sessionId, raw_messages)
         await db.update_session(
