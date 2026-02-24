@@ -294,6 +294,12 @@ async def send_message(body: SendMessageRequest, request: Request):
     if session_row is None:
         raise HTTPException(status_code=404, detail="Session not found")
 
+    if session_row.get("status") == "approved":
+        raise HTTPException(
+            status_code=409,
+            detail="Session is approved. Use /session/review to request changes.",
+        )
+
     # 1. Save BA message to DB
     await db.insert_message(
         session_id=body.sessionId,
@@ -312,10 +318,17 @@ async def send_message(body: SendMessageRequest, request: Request):
     # 3. Persist agent messages + update session
     messages = await _persist_agent_messages(body.sessionId, raw_messages)
 
-    # Only mark spec_ready when all dimensions score >= 80
+    # Manage status transitions based on completeness scores
+    current_status = session_row.get("status", "in_progress")
     new_status: str | None = None
     if all(v >= 80 for v in updates["completeness"].values()):
-        new_status = "spec_ready"
+        # Only promote to spec_ready from in_progress (don't overwrite approved)
+        if current_status == "in_progress":
+            new_status = "spec_ready"
+    else:
+        # If scores dropped below threshold, revert spec_ready back to in_progress
+        if current_status == "spec_ready":
+            new_status = "in_progress"
 
     await db.update_session(
         body.sessionId,
@@ -366,7 +379,11 @@ async def review_session(body: ReviewRequest, request: Request):
     if body.action == "approve":
         await db.update_session(body.sessionId, status="approved")
         # TODO: trigger git push workflow here
-        return ReviewResponse(status="approved")
+        updated_row = await db.get_session(body.sessionId)
+        return ReviewResponse(
+            status="approved",
+            session=_db_row_to_session(updated_row),
+        )
 
     # request_changes — feed feedback back into agent
     if body.feedback:
@@ -377,12 +394,18 @@ async def review_session(body: ReviewRequest, request: Request):
         raw_messages, updates = await _run_agent_turn(
             graph, body.sessionId, [feedback_msg]
         )
-        await _persist_agent_messages(body.sessionId, raw_messages)
+        messages = await _persist_agent_messages(body.sessionId, raw_messages)
         await db.update_session(
             body.sessionId,
             completeness=updates["completeness"],
             spec_md=updates.get("spec_md"),
             status="in_progress",
+        )
+        updated_row = await db.get_session(body.sessionId)
+        return ReviewResponse(
+            status="revision_requested",
+            session=_db_row_to_session(updated_row),
+            messages=messages,
         )
 
     return ReviewResponse(status="revision_requested")

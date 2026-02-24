@@ -92,6 +92,8 @@ class MessagesResponse(BaseModel):
 
 class ReviewResponse(BaseModel):
     status: Literal["approved", "revision_requested"]
+    session: Session | None = None
+    messages: list[Message] | None = None
 
 
 class ModelInfo(BaseModel):

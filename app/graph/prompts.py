@@ -91,6 +91,7 @@ def build_system_prompt(state: AgentState) -> str:
 - **Task:** {task_title}
 - **Teamwork Task ID:** {teamwork_task_id}
 - **Description:** {task_description or "No description provided"}
+- **Session Status:** {state.get("session_status", "in_progress")}
 
 {completeness_block}
 {decisions_block}
@@ -107,6 +108,8 @@ def build_system_prompt(state: AgentState) -> str:
 - Do NOT invent requirements — ask when uncertain.
 - Do NOT include implementation details (how to build) — only behaviour (what to build).
 - The conversation can be non-linear. The BA may jump between topics. Adapt gracefully.
+- If the BA asks an off-topic or ad-hoc question (not related to spec dimensions), answer it briefly and helpfully, then steer back to the current intake topic. Do not force off-topic questions into the spec framework.
+- If the BA asks about project timeline, technical implementation, or topics outside spec scope, acknowledge the question, give a brief answer if possible, and redirect to the next spec gap.
 
 ## Spec Building Rules
 - ALWAYS include spec_md in your finalize_turn call, even on the first turn.
