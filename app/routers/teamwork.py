@@ -39,12 +39,12 @@ MOCK_PROJECTS = [
                         "session_id": None,
                         "spec_md": None,
                         "completeness": {
-                            "user_roles": False,
-                            "business_rules": False,
-                            "acceptance_criteria": False,
-                            "scope_boundaries": False,
-                            "error_handling": False,
-                            "data_model": False,
+                            "user_roles": 0,
+                            "business_rules": 0,
+                            "acceptance_criteria": 0,
+                            "scope_boundaries": 0,
+                            "error_handling": 0,
+                            "data_model": 0,
                         },
                     }
                 ],
@@ -112,12 +112,12 @@ async def _fetch_teamwork_projects() -> list[dict]:
                         "session_id": None,
                         "spec_md": None,
                         "completeness": {
-                            "user_roles": False,
-                            "business_rules": False,
-                            "acceptance_criteria": False,
-                            "scope_boundaries": False,
-                            "error_handling": False,
-                            "data_model": False,
+                            "user_roles": 0,
+                            "business_rules": 0,
+                            "acceptance_criteria": 0,
+                            "scope_boundaries": 0,
+                            "error_handling": 0,
+                            "data_model": 0,
                         },
                     }
                     for t in (tr.json().get("tasks", []) if tr.is_success else [])

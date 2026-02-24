@@ -155,7 +155,7 @@ async def search_gdrive(query: str) -> str:
 @tool
 def finalize_turn(
     messages: list[dict],
-    completeness_updates: dict[str, bool] | None = None,
+    completeness: dict[str, int] | None = None,
     decisions: list[dict] | None = None,
     spec_md: str | None = None,
 ) -> str:
@@ -190,14 +190,17 @@ def finalize_turn(
               "round": 1
             }
 
-        completeness_updates: Dict of dimension booleans that changed to true.
-            Only include dimensions that JUST became complete this turn.
-            e.g. {"user_roles": true, "business_rules": true}
+        completeness: Full completeness map with integer scores 0-100 for ALL 6 dimensions.
+            Score reflects the quality of that section in the current spec_md.
+            ALWAYS provide all 6 keys. Scores CAN go down if spec content is weakened.
+            e.g. {"user_roles": 85, "business_rules": 60, "acceptance_criteria": 30,
+                  "scope_boundaries": 70, "error_handling": 0, "data_model": 45}
 
         decisions: List of decisions confirmed this turn:
             [{"decision": "...", "source": "...", "round": 1}]
 
-        spec_md: Full SPEC.md markdown string. Only set when content_type is "spec_preview".
+        spec_md: Current SPEC.md draft. ALWAYS provide this, even as a partial skeleton
+            with [Pending] placeholders on early turns. This is the single source of truth.
     """
     # This function body is never called — the graph detects finalize_turn
     # in the tool calls and exits before execution.

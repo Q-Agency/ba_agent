@@ -90,7 +90,7 @@ async def _run_agent_turn(
     initial_state: dict | None = None,
 ) -> tuple[list[dict], dict]:
     """
-    Run one agent turn. Returns (frontend_messages, updated_completeness_dict).
+    Run one agent turn. Returns (frontend_messages, updates_dict).
 
     - initial_state: provided only on session start (sets session metadata)
     - subsequent turns just pass new messages; LangGraph resumes from checkpoint
@@ -111,19 +111,28 @@ async def _run_agent_turn(
         text = getattr(last_msg, "content", str(last_msg))
         finalize_args = {
             "messages": [{"content_type": "text", "content": text, "citations": []}],
-            "completeness_updates": {},
+            "completeness": None,
             "decisions": [],
             "spec_md": None,
         }
 
     raw_messages: list[dict] = finalize_args.get("messages", [])
-    completeness_updates: dict = finalize_args.get("completeness_updates") or {}
+    new_completeness: dict | None = finalize_args.get("completeness")
     decisions: list = finalize_args.get("decisions") or []
     spec_md: str | None = finalize_args.get("spec_md")
 
-    # Merge completeness
+    # Use agent's full completeness map if provided, else keep current state
     current_completeness = dict(final_state.get("completeness") or DEFAULT_COMPLETENESS)
-    current_completeness.update({k: v for k, v in completeness_updates.items() if isinstance(v, bool)})
+    if new_completeness:
+        for key in current_completeness:
+            if key in new_completeness:
+                val = new_completeness[key]
+                if isinstance(val, (int, float)):
+                    current_completeness[key] = max(0, min(100, int(val)))
+
+    # Fall back to previous spec_md if agent omitted it
+    if spec_md is None:
+        spec_md = final_state.get("spec_md")
 
     return raw_messages, {
         "completeness": current_completeness,
@@ -214,8 +223,9 @@ async def start_session(body: StartSessionRequest, request: Request):
         spec_md=updates.get("spec_md"),
     )
 
-    # 5. Return
+    # 5. Return — re-fetch to get fully updated row
     session_row["completeness"] = updates["completeness"]
+    session_row["spec_md"] = updates.get("spec_md")
     return SessionWithMessages(
         session=_db_row_to_session(session_row),
         messages=messages,
@@ -227,7 +237,7 @@ async def start_session(body: StartSessionRequest, request: Request):
 # ---------------------------------------------------------------------------
 
 
-@router.post("/session/message", response_model=MessagesResponse)
+@router.post("/session/message", response_model=SessionWithMessages)
 async def send_message(body: SendMessageRequest, request: Request):
     session_row = await db.get_session(body.sessionId)
     if session_row is None:
@@ -251,8 +261,9 @@ async def send_message(body: SendMessageRequest, request: Request):
     # 3. Persist agent messages + update session
     messages = await _persist_agent_messages(body.sessionId, raw_messages)
 
+    # Only mark spec_ready when all dimensions score >= 80
     new_status: str | None = None
-    if updates.get("spec_md"):
+    if all(v >= 80 for v in updates["completeness"].values()):
         new_status = "spec_ready"
 
     await db.update_session(
@@ -262,7 +273,12 @@ async def send_message(body: SendMessageRequest, request: Request):
         status=new_status,
     )
 
-    return MessagesResponse(messages=messages)
+    # 4. Re-fetch the updated session row for the response
+    updated_row = await db.get_session(body.sessionId)
+    return SessionWithMessages(
+        session=_db_row_to_session(updated_row),
+        messages=messages,
+    )
 
 
 # ---------------------------------------------------------------------------

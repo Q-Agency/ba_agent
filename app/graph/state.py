@@ -12,12 +12,12 @@ from langgraph.graph.message import add_messages
 
 
 class CompletenessMap(TypedDict):
-    user_roles: bool
-    business_rules: bool
-    acceptance_criteria: bool
-    scope_boundaries: bool
-    error_handling: bool
-    data_model: bool
+    user_roles: int       # 0-100
+    business_rules: int
+    acceptance_criteria: int
+    scope_boundaries: int
+    error_handling: int
+    data_model: int
 
 
 class AgentState(TypedDict):
@@ -33,7 +33,7 @@ class AgentState(TypedDict):
     project_name: str
 
     # Mutated each turn
-    phase: str  # "research" | "questioning" | "generating" | "review"
+    phase: str  # "research" | "questioning" | "review"
     completeness: CompletenessMap
     decisions: list[dict]
     spec_md: str | None
@@ -45,10 +45,10 @@ class AgentState(TypedDict):
 
 
 DEFAULT_COMPLETENESS: CompletenessMap = {
-    "user_roles": False,
-    "business_rules": False,
-    "acceptance_criteria": False,
-    "scope_boundaries": False,
-    "error_handling": False,
-    "data_model": False,
+    "user_roles": 0,
+    "business_rules": 0,
+    "acceptance_criteria": 0,
+    "scope_boundaries": 0,
+    "error_handling": 0,
+    "data_model": 0,
 }

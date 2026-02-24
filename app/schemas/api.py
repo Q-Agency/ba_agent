@@ -14,12 +14,12 @@ from pydantic import BaseModel
 
 
 class CompletenessMap(BaseModel):
-    user_roles: bool = False
-    business_rules: bool = False
-    acceptance_criteria: bool = False
-    scope_boundaries: bool = False
-    error_handling: bool = False
-    data_model: bool = False
+    user_roles: int = 0
+    business_rules: int = 0
+    acceptance_criteria: int = 0
+    scope_boundaries: int = 0
+    error_handling: int = 0
+    data_model: int = 0
 
 
 class Session(BaseModel):

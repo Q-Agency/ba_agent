@@ -34,7 +34,7 @@ _EXECUTABLE_TOOLS = {
 _llm = ChatAnthropic(
     model=settings.anthropic_model,
     anthropic_api_key=settings.anthropic_api_key,
-    max_tokens=4096,
+    max_tokens=8192,
 ).bind_tools(AGENT_TOOLS)
 
 

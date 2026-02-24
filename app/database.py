@@ -43,13 +43,27 @@ async def close_pool() -> None:
 # ---------------------------------------------------------------------------
 
 DEFAULT_COMPLETENESS = {
-    "user_roles": False,
-    "business_rules": False,
-    "acceptance_criteria": False,
-    "scope_boundaries": False,
-    "error_handling": False,
-    "data_model": False,
+    "user_roles": 0,
+    "business_rules": 0,
+    "acceptance_criteria": 0,
+    "scope_boundaries": 0,
+    "error_handling": 0,
+    "data_model": 0,
 }
+
+
+def normalize_completeness(raw: dict) -> dict:
+    """Convert legacy boolean completeness to integer scores (0-100)."""
+    result = {}
+    for key in DEFAULT_COMPLETENESS:
+        val = raw.get(key, 0)
+        if isinstance(val, bool):
+            result[key] = 100 if val else 0
+        elif isinstance(val, (int, float)):
+            result[key] = max(0, min(100, int(val)))
+        else:
+            result[key] = 0
+    return result
 
 
 async def create_session(
@@ -112,8 +126,10 @@ async def get_session(session_id: str) -> dict | None:
     row = dict(row)
     if isinstance(row.get("completeness"), str):
         row["completeness"] = json.loads(row["completeness"])
-    elif row.get("completeness") is None:
+    if row.get("completeness") is None:
         row["completeness"] = dict(DEFAULT_COMPLETENESS)
+    else:
+        row["completeness"] = normalize_completeness(row["completeness"])
     return row
 
 

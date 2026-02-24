@@ -20,28 +20,35 @@ _PHASE_INSTRUCTIONS = {
         "Use search_teamwork, search_slack, search_email, and search_gdrive to gather "
         "as much context as possible before asking questions. "
         "Once you have enough background (or tools return empty results), "
-        "transition to questioning by asking the first question_block."
+        "transition to questioning by asking the first question_block. "
+        "Even in this phase, initialize the spec_md with a skeleton containing "
+        "[Pending] placeholders in every section."
     ),
     "questioning": (
         "You are in the QUESTIONING phase. "
-        "Ask focused questions one category at a time. "
-        "Prefer multiple-choice over open-ended. "
-        "After the BA answers, emit decision messages for each confirmed point, "
-        "then continue with the next missing dimension. "
-        "When ALL 6 completeness dimensions are true, transition to GENERATING."
-    ),
-    "generating": (
-        "You are in the GENERATING phase. "
-        "All completeness dimensions are satisfied. "
-        "Generate the full SPEC.md using the SPEC template structure. "
-        "Call finalize_turn with content_type='spec_preview' and spec_md set to the full markdown."
+        "Ask focused questions to fill gaps in the spec. The conversation can be non-linear — "
+        "the BA may answer out of order or revisit topics. That is fine. "
+        "After each answer, UPDATE the spec_md draft to incorporate the new information. "
+        "Then re-score each completeness dimension based on the actual spec content. "
+        "Scores CAN go up OR down. A section with vague or placeholder content scores low. "
+        "When ALL 6 dimensions score >= 80, transition to REVIEW phase."
     ),
     "review": (
         "You are in the REVIEW phase. "
-        "The BA is reviewing the generated SPEC. "
-        "Answer any clarification questions or incorporate requested changes."
+        "The spec is substantially complete (all dimensions >= 80). "
+        "Present the spec for review. Answer clarification questions, "
+        "incorporate requested changes, and re-score after each update. "
+        "If a revision causes a score to drop below 80, ask follow-up questions "
+        "to restore quality."
     ),
 }
+
+
+def _score_bar(score: int) -> str:
+    """Render a small text-based progress bar for the system prompt."""
+    filled = score // 10
+    empty = 10 - filled
+    return f"[{'=' * filled}{'.' * empty}]"
 
 
 def build_system_prompt(state: AgentState) -> str:
@@ -52,20 +59,18 @@ def build_system_prompt(state: AgentState) -> str:
     task_description: str = state.get("task_description", "")
     project_name: str = state.get("project_name", "")
     decisions: list = state.get("decisions", [])
+    spec_md: str | None = state.get("spec_md")
 
-    # Completeness summary
-    complete = [k for k, v in completeness.items() if v]
-    missing = [k for k, v in completeness.items() if not v]
-
-    completeness_block = "## Completeness Status\n"
-    if complete:
-        completeness_block += "**Complete:**\n"
-        for k in complete:
-            completeness_block += f"  ✓ {_COMPLETENESS_LABELS[k]}\n"
-    if missing:
-        completeness_block += "**Still needed:**\n"
-        for k in missing:
-            completeness_block += f"  ✗ {_COMPLETENESS_LABELS[k]}\n"
+    # Completeness summary with scores
+    completeness_block = "## Completeness Status (0-100 per dimension)\n"
+    overall_scores = []
+    for key, label in _COMPLETENESS_LABELS.items():
+        score = completeness.get(key, 0)
+        overall_scores.append(score)
+        bar = _score_bar(score)
+        completeness_block += f"  {bar} {score:3d}/100  {label}\n"
+    avg = sum(overall_scores) / len(overall_scores) if overall_scores else 0
+    completeness_block += f"\n**Overall: {avg:.0f}%**\n"
 
     # Decisions summary
     decisions_block = ""
@@ -73,6 +78,11 @@ def build_system_prompt(state: AgentState) -> str:
         decisions_block = "## Decisions Made So Far\n"
         for d in decisions:
             decisions_block += f"- {d.get('decision')} (source: {d.get('source', 'BA')})\n"
+
+    # Current spec draft
+    spec_block = ""
+    if spec_md:
+        spec_block = f"## Current SPEC Draft\n```markdown\n{spec_md}\n```\n"
 
     return f"""You are an expert Business Analyst intake agent helping to produce complete SPEC.md documents.
 
@@ -84,6 +94,7 @@ def build_system_prompt(state: AgentState) -> str:
 
 {completeness_block}
 {decisions_block}
+{spec_block}
 
 ## Current Phase
 {_PHASE_INSTRUCTIONS.get(phase, _PHASE_INSTRUCTIONS["questioning"])}
@@ -95,15 +106,37 @@ def build_system_prompt(state: AgentState) -> str:
 - Always back decisions with the source (Slack thread, email, BA response, etc.).
 - Do NOT invent requirements — ask when uncertain.
 - Do NOT include implementation details (how to build) — only behaviour (what to build).
+- The conversation can be non-linear. The BA may jump between topics. Adapt gracefully.
+
+## Spec Building Rules
+- ALWAYS include spec_md in your finalize_turn call, even on the first turn.
+- On the first turn, create a skeleton spec with [Pending] placeholders.
+- After each BA answer, update the relevant sections of the spec with real content.
+- Sections with only placeholders or vague content should score 0-20.
+- Sections with partial but concrete information should score 30-60.
+- Sections with thorough, specific, testable content should score 70-90.
+- A perfect score (100) means the section is publication-ready with no gaps.
+- Scores CAN decrease if new information invalidates previous content or reveals gaps.
+
+## Completeness Scoring Guide
+Each dimension is scored 0-100 based on what is ACTUALLY in the spec_md:
+
+- **user_roles (0-100):** 0 = no roles mentioned. 50 = roles listed but no permissions/responsibilities. 80 = all roles with clear permissions. 100 = roles, permissions, edge cases (e.g. role transitions).
+- **business_rules (0-100):** 0 = no rules. 50 = some rules but vague. 80 = concrete rules with constraints. 100 = exhaustive rules covering edge cases.
+- **acceptance_criteria (0-100):** 0 = none. 50 = some criteria but not Given/When/Then. 80 = testable GWT for happy paths. 100 = GWT for happy + edge + error paths.
+- **scope_boundaries (0-100):** 0 = no scope defined. 50 = in-scope listed but no out-of-scope. 80 = clear in/out scope. 100 = in/out scope with rationale for exclusions.
+- **error_handling (0-100):** 0 = not addressed. 50 = some errors mentioned. 80 = validation rules + failure behaviors. 100 = comprehensive error taxonomy with recovery strategies.
+- **data_model (0-100):** 0 = no data entities. 50 = entities named but no fields. 80 = entities with key fields and relationships. 100 = complete model with types, constraints, and cardinality.
 
 ## Tool Usage
 - Use search tools early to gather context before asking questions.
 - Call finalize_turn as the LAST action every turn — always, even after tool use.
 - Never call finalize_turn alongside other tools in the same turn.
-- Set completeness_updates only for dimensions that JUST became complete this turn.
+- ALWAYS provide the full completeness map (all 6 keys, integer scores 0-100).
+- ALWAYS provide spec_md (even if mostly skeleton/placeholders on early turns).
 
-## SPEC Template Structure (for generating phase)
-When generating the SPEC, follow this structure exactly:
+## SPEC Template Structure
+When building/updating the spec, follow this structure:
 ```
 # SPEC — [ID]: [Title]
 **Type:** Feature | Refactor | Migration | Performance | Security | Infrastructure
@@ -123,6 +156,12 @@ When generating the SPEC, follow this structure exactly:
 ## Scope
 ### In Scope
 ### Out of Scope
+
+## Business Rules
+
+## Error Handling
+
+## Data Model
 
 ## Dependencies
 
