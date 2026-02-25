@@ -17,6 +17,7 @@ from typing import Any
 
 from fastapi import APIRouter, HTTPException, Request
 from langchain_core.messages import HumanMessage
+from psycopg.rows import dict_row
 
 from app import database as db
 from app.graph.graph import build_graph, extract_finalize_args
@@ -29,6 +30,7 @@ from app.schemas.api import (
     MessagesResponse,
     ModelInfo,
     ModelsResponse,
+    ResetSessionRequest,
     ReviewRequest,
     ReviewResponse,
     SendMessageRequest,
@@ -72,6 +74,7 @@ def _db_row_to_session(row: dict) -> Session:
         created_by=row.get("created_by", "agent"),
         spec_md=row.get("spec_md"),
         completeness=CompletenessMap(**comp),
+        model=row.get("model", "claude-sonnet-4-6"),
     )
 
 
@@ -232,6 +235,7 @@ async def start_session(body: StartSessionRequest, request: Request):
         teamwork_task_id=body.teamworkTaskId,
         task_title=body.taskTitle,
         project_name=body.projectName,
+        model=body.model,
     )
 
     # 2. Build initial LangGraph state
@@ -409,3 +413,53 @@ async def review_session(body: ReviewRequest, request: Request):
         )
 
     return ReviewResponse(status="revision_requested")
+
+
+# ---------------------------------------------------------------------------
+# POST /session/reset
+# ---------------------------------------------------------------------------
+
+
+@router.post("/session/reset")
+async def reset_session(body: ResetSessionRequest):
+    """Delete ALL sessions for a teamwork task so it can be started fresh."""
+    session_row = await db.get_session(body.sessionId)
+    if session_row is None:
+        raise HTTPException(status_code=404, detail="Session not found")
+
+    tw_id = session_row.get("teamwork_task_id", "")
+
+    # Find all session IDs for this teamwork task (there may be stale ones)
+    all_session_ids = [body.sessionId]
+    if tw_id:
+        pool = await db.get_pool()
+        async with pool.connection() as conn:
+            async with conn.cursor(row_factory=dict_row) as cur:
+                await cur.execute(
+                    "SELECT id FROM ba_sessions WHERE teamwork_task_id = %s",
+                    (tw_id,),
+                )
+                all_session_ids = [r["id"] for r in await cur.fetchall()]
+
+    # Best-effort cleanup of LangGraph checkpoint tables for ALL sessions
+    pool = await db.get_pool()
+    for sid in all_session_ids:
+        for table in ("checkpoint_writes", "checkpoint_blobs", "checkpoints"):
+            try:
+                async with pool.connection() as conn:
+                    await conn.execute(
+                        f"DELETE FROM {table} WHERE thread_id = %s",
+                        (sid,),
+                    )
+            except Exception as exc:
+                logger.warning("Could not clean checkpoint table %s for %s: %s", table, sid, exc)
+
+    # Delete ALL sessions + messages for this teamwork task
+    if tw_id:
+        count = await db.delete_sessions_by_teamwork_id(tw_id)
+        logger.info("Reset teamwork task %s: deleted %d session(s)", tw_id, count)
+    else:
+        await db.delete_session(body.sessionId)
+        logger.info("Reset session %s (no teamwork_task_id)", body.sessionId)
+
+    return {"status": "reset"}

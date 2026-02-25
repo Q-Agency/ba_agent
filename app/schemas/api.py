@@ -34,6 +34,7 @@ class Session(BaseModel):
     created_by: str
     spec_md: str | None
     completeness: CompletenessMap
+    model: str = "claude-sonnet-4-6"
 
 
 class Message(BaseModel):
@@ -75,6 +76,10 @@ class ReviewRequest(BaseModel):
     action: Literal["approve", "request_changes"]
     feedback: str | None = None
     model: str = "claude-sonnet-4-6"
+
+
+class ResetSessionRequest(BaseModel):
+    sessionId: str
 
 
 # ---------------------------------------------------------------------------

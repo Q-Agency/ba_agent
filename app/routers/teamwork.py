@@ -16,6 +16,7 @@ from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
 
 from app.config import settings
+from app import database as db
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
@@ -127,6 +128,29 @@ async def _fetch_teamwork_projects() -> list[dict]:
             projects.append(
                 {"id": str(pid), "name": p.get("name"), "description": p.get("description"), "task_lists": task_lists}
             )
+
+        # Enrich tasks with persisted session data from ba_sessions
+        all_tw_ids = [
+            t["teamwork_task_id"]
+            for p in projects
+            for tl in p["task_lists"]
+            for t in tl["tasks"]
+        ]
+        if all_tw_ids:
+            sessions = await db.get_sessions_by_teamwork_ids(all_tw_ids)
+            status_map = {"in_progress": "has_session", "spec_ready": "spec_ready", "approved": "approved"}
+            for p in projects:
+                for tl in p["task_lists"]:
+                    for t in tl["tasks"]:
+                        sess = sessions.get(t["teamwork_task_id"])
+                        if sess:
+                            t["session_id"] = sess["id"]
+                            t["status"] = status_map.get(sess["status"], "has_session")
+                            t["spec_md"] = sess.get("spec_md")
+                            t["completeness"] = sess.get("completeness", t["completeness"])
+                            if sess.get("updated_at"):
+                                t["updated_at"] = sess["updated_at"]
+
         return projects
 
 

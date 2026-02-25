@@ -28,6 +28,14 @@ async def get_pool() -> AsyncConnectionPool:
             open=False,
         )
         await _pool.open()
+        # Auto-migrate: add model column if missing
+        try:
+            async with _pool.connection() as conn:
+                await conn.execute(
+                    "ALTER TABLE ba_sessions ADD COLUMN IF NOT EXISTS model TEXT DEFAULT 'claude-sonnet-4-6'"
+                )
+        except Exception:
+            pass  # column already exists or table not yet created
     return _pool
 
 
@@ -73,6 +81,7 @@ async def create_session(
     teamwork_task_id: str,
     task_title: str,
     project_name: str,
+    model: str = "claude-sonnet-4-6",
 ) -> dict:
     pool = await get_pool()
     now = datetime.now(timezone.utc).isoformat()
@@ -82,8 +91,8 @@ async def create_session(
             INSERT INTO ba_sessions
                 (id, task_id, teamwork_task_id, teamwork_task_title,
                  project_name, status, created_at, updated_at,
-                 created_by, spec_md, completeness)
-            VALUES (%s, %s, %s, %s, %s, 'in_progress', %s, %s, 'agent', NULL, %s)
+                 created_by, spec_md, completeness, model)
+            VALUES (%s, %s, %s, %s, %s, 'in_progress', %s, %s, 'agent', NULL, %s, %s)
             ON CONFLICT (id) DO NOTHING
             """,
             (
@@ -95,6 +104,7 @@ async def create_session(
                 now,
                 now,
                 json.dumps(DEFAULT_COMPLETENESS),
+                model,
             ),
         )
     return {
@@ -109,6 +119,7 @@ async def create_session(
         "created_by": "agent",
         "spec_md": None,
         "completeness": DEFAULT_COMPLETENESS,
+        "model": model,
     }
 
 
@@ -161,6 +172,65 @@ async def update_session(
             f"UPDATE ba_sessions SET {', '.join(sets)} WHERE id = %s",
             params,
         )
+
+
+async def delete_session(session_id: str) -> bool:
+    """Delete a session and its messages. Returns True if the session row was deleted."""
+    pool = await get_pool()
+    async with pool.connection() as conn:
+        await conn.execute("DELETE FROM ba_messages WHERE session_id = %s", (session_id,))
+        cur = await conn.execute("DELETE FROM ba_sessions WHERE id = %s", (session_id,))
+        deleted = cur.rowcount > 0
+    return deleted
+
+
+async def delete_sessions_by_teamwork_id(teamwork_task_id: str) -> int:
+    """Delete ALL sessions (and their messages) for a given teamwork task. Returns count deleted."""
+    pool = await get_pool()
+    async with pool.connection() as conn:
+        await conn.execute(
+            "DELETE FROM ba_messages WHERE session_id IN (SELECT id FROM ba_sessions WHERE teamwork_task_id = %s)",
+            (teamwork_task_id,),
+        )
+        cur = await conn.execute(
+            "DELETE FROM ba_sessions WHERE teamwork_task_id = %s",
+            (teamwork_task_id,),
+        )
+        return cur.rowcount
+
+
+async def get_sessions_by_teamwork_ids(
+    teamwork_ids: list[str],
+) -> dict[str, dict]:
+    """Batch-fetch sessions keyed by teamwork_task_id for task enrichment."""
+    if not teamwork_ids:
+        return {}
+    pool = await get_pool()
+    async with pool.connection() as conn:
+        async with conn.cursor(row_factory=dict_row) as cur:
+            await cur.execute(
+                """
+                SELECT DISTINCT ON (teamwork_task_id)
+                       id, teamwork_task_id, status, spec_md,
+                       completeness, updated_at
+                FROM ba_sessions
+                WHERE teamwork_task_id = ANY(%s)
+                ORDER BY teamwork_task_id, updated_at DESC
+                """,
+                (teamwork_ids,),
+            )
+            rows = await cur.fetchall()
+    result: dict[str, dict] = {}
+    for row in rows:
+        row = dict(row)
+        if isinstance(row.get("completeness"), str):
+            row["completeness"] = json.loads(row["completeness"])
+        if row.get("completeness") is None:
+            row["completeness"] = dict(DEFAULT_COMPLETENESS)
+        else:
+            row["completeness"] = normalize_completeness(row["completeness"])
+        result[row["teamwork_task_id"]] = row
+    return result
 
 
 # ---------------------------------------------------------------------------
