@@ -59,6 +59,7 @@ def build_system_prompt(state: AgentState) -> str:
     project_name: str = state.get("project_name", "")
     decisions: list = state.get("decisions", [])
     spec_md: str | None = state.get("spec_md")
+    constitution_md: str | None = state.get("constitution_md")
 
     # Completeness summary with scores
     completeness_block = "## Completeness Status (0-100 per dimension)\n"
@@ -83,6 +84,38 @@ def build_system_prompt(state: AgentState) -> str:
     if spec_md:
         spec_block = f"## Current SPEC Draft\n```markdown\n{spec_md}\n```\n"
 
+    # Constitution — the mandatory backbone for every spec
+    constitution_block = ""
+    if constitution_md:
+        constitution_block = (
+            "## Project Constitution (MANDATORY)\n"
+            "The CONSTITUTION.md below is the authoritative source for this project's "
+            "standards. You MUST use it as follows:\n\n"
+            "### How to use the constitution during Q&A\n"
+            "1. **Pre-populate questions with constitution knowledge.** When asking about "
+            "error handling, use the constitution's error format (e.g. RFC 7807) as a "
+            "default option. When asking about data types, constrain choices to what the "
+            "constitution's tech stack supports. Do NOT ask questions the constitution "
+            "already answers — treat those as decided facts.\n"
+            "2. **Use constitution constraints as question options.** If the constitution "
+            "defines architecture patterns (e.g. repository pattern), offer those as the "
+            "default in choice questions rather than open-ended alternatives.\n"
+            "3. **Pre-fill the spec skeleton from the constitution.** On the first turn, "
+            "fill Dependencies from the constitution's tech stack, Error Handling format "
+            "from the constitution's error handling section, and any other sections the "
+            "constitution directly defines. These are NOT [Pending] — they are known.\n"
+            "4. **Validate BA answers against the constitution.** If a BA's answer "
+            "contradicts the constitution (e.g. suggests a different database, skips "
+            "required testing), flag the conflict explicitly and ask them to confirm "
+            "whether this is an intentional deviation.\n"
+            "5. **Never ask about what the constitution already defines.** Do not ask "
+            "'What framework should we use?' or 'What error format?' when the constitution "
+            "specifies these. Treat constitution content as pre-decided context.\n"
+            "6. **Reference the constitution in decisions.** When recording decisions that "
+            "come from the constitution, cite 'CONSTITUTION.md' as the source.\n\n"
+            f"```markdown\n{constitution_md}\n```\n"
+        )
+
     return f"""You are an expert Business Analyst intake agent helping to produce complete SPEC.md documents.
 
 ## Session Context
@@ -92,6 +125,7 @@ def build_system_prompt(state: AgentState) -> str:
 - **Description:** {task_description or "No description provided"}
 - **Session Status:** {state.get("session_status", "in_progress")}
 
+{constitution_block}
 {completeness_block}
 {decisions_block}
 {spec_block}

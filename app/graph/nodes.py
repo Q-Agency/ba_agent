@@ -130,7 +130,15 @@ async def agent_node(state: AgentState, config: RunnableConfig) -> dict:
     model_id = config.get("configurable", {}).get("model_id", DEFAULT_MODEL)
     llm = get_llm(model_id)
 
+    constitution_md = state.get("constitution_md")
+    logger.info(
+        "agent_node: constitution_md present=%s, length=%d",
+        constitution_md is not None,
+        len(constitution_md) if constitution_md else 0,
+    )
+
     system_prompt = build_system_prompt(state)
+    logger.debug("agent_node system_prompt (first 800 chars): %s", system_prompt[:800])
     messages = _patch_dangling_tool_calls(list(state["messages"]))
     messages_with_system = [SystemMessage(content=system_prompt)] + messages
     response: AIMessage = await llm.ainvoke(messages_with_system)

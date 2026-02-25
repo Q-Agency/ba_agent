@@ -15,14 +15,17 @@ import uuid
 from datetime import datetime, timezone
 from typing import Any
 
+import httpx
 from fastapi import APIRouter, HTTPException, Request
 from langchain_core.messages import HumanMessage
 from psycopg.rows import dict_row
 
 from app import database as db
+from app.routers.project_settings import _blob_to_raw_url
 from app.graph.graph import build_graph, extract_finalize_args
 from app.graph.nodes import MODEL_REGISTRY, DEFAULT_MODEL
 from app.graph.state import DEFAULT_COMPLETENESS, AgentState
+from app.routers.teamwork import upload_spec_to_task, move_task_to_stage
 from app.schemas.api import (
     CompletenessMap,
     GetSessionRequest,
@@ -56,6 +59,23 @@ def _graph(request: Request):
 def _make_config(session_id: str, model_id: str = DEFAULT_MODEL) -> dict:
     """LangGraph config for a session — thread_id drives checkpointing."""
     return {"configurable": {"thread_id": session_id, "model_id": model_id}}
+
+
+async def _fetch_constitution_content(blob_url: str) -> str | None:
+    """Download the raw markdown content of a constitution file from GitHub."""
+    raw_url = _blob_to_raw_url(blob_url)
+    if not raw_url:
+        return None
+    try:
+        async with httpx.AsyncClient(timeout=15) as client:
+            r = await client.get(raw_url, follow_redirects=True)
+            if r.status_code == 200:
+                return r.text
+            logger.warning("Constitution fetch %s → %s", raw_url, r.status_code)
+            return None
+    except Exception:
+        logger.warning("Failed to fetch constitution from %s", raw_url, exc_info=True)
+        return None
 
 
 def _db_row_to_session(row: dict) -> Session:
@@ -226,6 +246,35 @@ async def list_models():
 
 @router.post("/session/start", response_model=SessionWithMessages)
 async def start_session(body: StartSessionRequest, request: Request):
+    # ── Constitution gate ─────────────────────────────────────────────
+    # A valid constitution file is mandatory for every SPEC session.
+    project_id = body.projectId
+    if not project_id:
+        raise HTTPException(
+            status_code=422,
+            detail="projectId is required to look up the project constitution.",
+        )
+
+    settings_row = await db.get_project_settings(project_id)
+    constitution_url = (settings_row or {}).get("constitution_url")
+    constitution_status = (settings_row or {}).get("constitution_status")
+
+    if not constitution_url or constitution_status != "valid":
+        raise HTTPException(
+            status_code=422,
+            detail="Cannot start a SPEC session without a valid CONSTITUTION.md file. "
+                   "Please link a valid constitution file in the project settings first.",
+        )
+
+    # Fetch the actual markdown content — fail if unreachable
+    constitution_content = await _fetch_constitution_content(constitution_url)
+    if not constitution_content:
+        raise HTTPException(
+            status_code=422,
+            detail="The CONSTITUTION.md file could not be downloaded. "
+                   "Please verify the file is accessible and try again.",
+        )
+
     session_id = f"session-{uuid.uuid4().hex}"
 
     # 1. Insert into ba_sessions
@@ -246,6 +295,7 @@ async def start_session(body: StartSessionRequest, request: Request):
         "task_title": body.taskTitle,
         "task_description": body.taskDescription,
         "project_name": body.projectName,
+        "constitution_md": constitution_content,
         "phase": "research",
         "completeness": dict(DEFAULT_COMPLETENESS),
         "decisions": [],
@@ -382,7 +432,25 @@ async def review_session(body: ReviewRequest, request: Request):
 
     if body.action == "approve":
         await db.update_session(body.sessionId, status="approved")
-        # TODO: trigger git push workflow here
+
+        # Push approved SPEC to Teamwork (upload file + move column)
+        tw_task_id = session_row.get("teamwork_task_id", "")
+        spec_md = session_row.get("spec_md", "")
+        task_title = session_row.get("teamwork_task_title", "spec")
+
+        if tw_task_id and spec_md:
+            try:
+                await upload_spec_to_task(tw_task_id, spec_md, task_title)
+                logger.info("Uploaded SPEC to Teamwork task %s", tw_task_id)
+            except Exception as exc:
+                logger.error("Failed to upload SPEC to Teamwork task %s: %s", tw_task_id, exc)
+
+            try:
+                await move_task_to_stage(tw_task_id)
+                logger.info("Moved Teamwork task %s to Ready for Design", tw_task_id)
+            except Exception as exc:
+                logger.error("Failed to move Teamwork task %s to Ready for Design: %s", tw_task_id, exc)
+
         updated_row = await db.get_session(body.sessionId)
         return ReviewResponse(
             status="approved",

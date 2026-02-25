@@ -75,6 +75,83 @@ def _base_url() -> str:
 
 ALLOWED_PROJECT_IDS = ["820301", "822891"]
 
+# Workflow & stage IDs for the shared "test" workflow
+WORKFLOW_ID = 12487
+STAGE_READY_FOR_DESIGN = 64704
+
+
+def _base_url_v1() -> str:
+    return f"https://{settings.teamwork_domain}"
+
+
+async def upload_spec_to_task(task_id: str, spec_md: str, task_title: str) -> str:
+    """Upload SPEC.md as a file attachment to a Teamwork task.
+
+    Uses the presigned-URL flow:
+      1. GET presigned URL + ref from Teamwork
+      2. PUT file bytes to S3
+      3. PUT task update with pendingFileAttachments ref
+
+    Returns the file ref on success, or raises on failure.
+    """
+    file_bytes = spec_md.encode("utf-8")
+    file_name = f"SPEC-{task_title[:40].replace(' ', '_')}.md"
+    file_size = len(file_bytes)
+
+    tw_headers = _teamwork_headers()
+
+    async with httpx.AsyncClient(timeout=30) as client:
+        # 1. Get presigned URL (needs Teamwork auth)
+        r = await client.get(
+            f"{_base_url_v1()}/projects/api/v1/pendingfiles/presignedurl.json",
+            params={"fileName": file_name, "fileSize": file_size},
+            headers=tw_headers,
+        )
+        r.raise_for_status()
+        data = r.json()
+        ref = data["ref"]
+        upload_url = data["url"]
+        logger.info("Got presigned URL for %s (ref=%s)", file_name, ref)
+
+        # 2. Upload to S3 (NO Teamwork auth — presigned URL has its own)
+        s3_resp = await client.put(
+            upload_url,
+            content=file_bytes,
+            headers={
+                "Content-Length": str(file_size),
+                "Content-Type": "text/markdown",
+                "x-amz-acl": "public-read",
+            },
+        )
+        s3_resp.raise_for_status()
+        logger.info("Uploaded %s to S3 (%d bytes)", file_name, file_size)
+
+        # 3. Attach to task via V1 endpoint (needs Teamwork auth)
+        attach_resp = await client.put(
+            f"{_base_url_v1()}/tasks/{task_id}.json",
+            json={"todo-item": {"pendingFileAttachments": ref}},
+            headers=tw_headers,
+        )
+        attach_resp.raise_for_status()
+        logger.info("Attached %s to task %s", ref, task_id)
+
+    return ref
+
+
+async def move_task_to_stage(task_id: str, stage_id: int = STAGE_READY_FOR_DESIGN) -> None:
+    """Move a task to a workflow stage (board column) in Teamwork.
+
+    Uses V3 Workflows API:
+      POST /workflows/{workflowId}/stages/{stageId}/tasks.json
+    """
+    async with httpx.AsyncClient(headers=_teamwork_headers(), timeout=20) as client:
+        r = await client.post(
+            f"{_base_url()}/workflows/{WORKFLOW_ID}/stages/{stage_id}/tasks.json",
+            json={"taskIds": [int(task_id)]},
+        )
+        r.raise_for_status()
+        logger.info("Moved task %s to stage %s (workflow %s)", task_id, stage_id, WORKFLOW_ID)
+
 
 async def _fetch_teamwork_projects() -> list[dict]:
     async with httpx.AsyncClient(headers=_teamwork_headers(), timeout=20) as client:
@@ -126,7 +203,7 @@ async def _fetch_teamwork_projects() -> list[dict]:
                 task_lists.append({"id": str(tl_id), "name": tl.get("name"), "tasks": tasks})
 
             projects.append(
-                {"id": str(pid), "name": p.get("name"), "description": p.get("description"), "task_lists": task_lists}
+                {"id": str(pid), "teamwork_project_id": str(pid), "name": p.get("name"), "description": p.get("description"), "task_lists": task_lists}
             )
 
         # Enrich tasks with persisted session data from ba_sessions
@@ -150,6 +227,13 @@ async def _fetch_teamwork_projects() -> list[dict]:
                             t["completeness"] = sess.get("completeness", t["completeness"])
                             if sess.get("updated_at"):
                                 t["updated_at"] = sess["updated_at"]
+
+        # Enrich projects with constitution settings
+        all_settings = await db.get_all_project_settings()
+        for p in projects:
+            ps = all_settings.get(p["id"])
+            p["constitution_url"] = ps.get("constitution_url") if ps else None
+            p["constitution_status"] = ps.get("constitution_status") if ps else None
 
         return projects
 

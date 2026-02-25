@@ -58,6 +58,7 @@ class StartSessionRequest(BaseModel):
     taskTitle: str
     taskDescription: str = ""
     projectName: str
+    projectId: str = ""  # Teamwork project ID — used to look up constitution
     model: str = "claude-sonnet-4-6"
 
 
@@ -110,3 +111,29 @@ class ModelInfo(BaseModel):
 
 class ModelsResponse(BaseModel):
     models: list[ModelInfo]
+
+
+# ---------------------------------------------------------------------------
+# Project settings
+# ---------------------------------------------------------------------------
+
+
+class ProjectSettings(BaseModel):
+    teamwork_project_id: str
+    constitution_url: str | None = None
+    constitution_status: str | None = None  # "valid" | "invalid" | None
+    created_at: str | None = None
+    updated_at: str | None = None
+
+
+class GetProjectSettingsRequest(BaseModel):
+    projectId: str
+
+
+class SaveProjectSettingsRequest(BaseModel):
+    projectId: str
+    constitutionUrl: str | None = None
+
+
+class ProjectSettingsResponse(BaseModel):
+    settings: ProjectSettings

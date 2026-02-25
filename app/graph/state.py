@@ -31,6 +31,7 @@ class AgentState(TypedDict):
     task_title: str
     task_description: str
     project_name: str
+    constitution_md: str | None  # Project constitution — mandatory backbone for specs
 
     # Mutated each turn
     phase: str  # "research" | "questioning" | "review"

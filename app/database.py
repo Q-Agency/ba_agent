@@ -34,8 +34,22 @@ async def get_pool() -> AsyncConnectionPool:
                 await conn.execute(
                     "ALTER TABLE ba_sessions ADD COLUMN IF NOT EXISTS model TEXT DEFAULT 'claude-sonnet-4-6'"
                 )
+                await conn.execute(
+                    """
+                    CREATE TABLE IF NOT EXISTS ba_project_settings (
+                        teamwork_project_id TEXT PRIMARY KEY,
+                        constitution_url    TEXT,
+                        constitution_status TEXT DEFAULT NULL,
+                        created_at          TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                        updated_at          TIMESTAMPTZ NOT NULL DEFAULT NOW()
+                    )
+                    """
+                )
+                await conn.execute(
+                    "ALTER TABLE ba_project_settings ADD COLUMN IF NOT EXISTS constitution_status TEXT DEFAULT NULL"
+                )
         except Exception:
-            pass  # column already exists or table not yet created
+            pass  # column/table already exists or table not yet created
     return _pool
 
 
@@ -272,6 +286,59 @@ async def insert_message(
         "created_at": now,
         "sources": sources,
     }
+
+
+# ---------------------------------------------------------------------------
+# ba_project_settings CRUD
+# ---------------------------------------------------------------------------
+
+
+async def get_project_settings(teamwork_project_id: str) -> dict | None:
+    pool = await get_pool()
+    async with pool.connection() as conn:
+        async with conn.cursor(row_factory=dict_row) as cur:
+            await cur.execute(
+                "SELECT * FROM ba_project_settings WHERE teamwork_project_id = %s LIMIT 1",
+                (teamwork_project_id,),
+            )
+            row = await cur.fetchone()
+    return dict(row) if row else None
+
+
+async def get_all_project_settings() -> dict[str, dict]:
+    pool = await get_pool()
+    async with pool.connection() as conn:
+        async with conn.cursor(row_factory=dict_row) as cur:
+            await cur.execute("SELECT * FROM ba_project_settings")
+            rows = await cur.fetchall()
+    return {row["teamwork_project_id"]: dict(row) for row in rows}
+
+
+async def upsert_project_settings(
+    teamwork_project_id: str,
+    *,
+    constitution_url: str | None = None,
+    constitution_status: str | None = None,
+) -> dict:
+    pool = await get_pool()
+    now = datetime.now(timezone.utc).isoformat()
+    async with pool.connection() as conn:
+        async with conn.cursor(row_factory=dict_row) as cur:
+            await cur.execute(
+                """
+                INSERT INTO ba_project_settings
+                    (teamwork_project_id, constitution_url, constitution_status, created_at, updated_at)
+                VALUES (%s, %s, %s, %s, %s)
+                ON CONFLICT (teamwork_project_id) DO UPDATE SET
+                    constitution_url = EXCLUDED.constitution_url,
+                    constitution_status = EXCLUDED.constitution_status,
+                    updated_at = EXCLUDED.updated_at
+                RETURNING *
+                """,
+                (teamwork_project_id, constitution_url, constitution_status, now, now),
+            )
+            row = await cur.fetchone()
+    return dict(row)
 
 
 async def get_messages(session_id: str) -> list[dict]:

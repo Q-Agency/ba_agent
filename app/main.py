@@ -19,6 +19,7 @@ from psycopg_pool import AsyncConnectionPool
 from app import database as db
 from app.config import settings
 from app.graph.graph import build_graph
+from app.routers import project_settings as project_settings_router
 from app.routers import session as session_router
 from app.routers import teamwork as teamwork_router
 
@@ -74,6 +75,7 @@ app.add_middleware(
 )
 
 # Mount routers — paths match the n8n webhook paths the frontend already calls
+app.include_router(project_settings_router.router)
 app.include_router(session_router.router)
 app.include_router(teamwork_router.router)
 
