@@ -92,7 +92,10 @@ def finalize_turn(
         messages: List of message objects to send. Each has:
             - content_type: "text" | "question_block" | "decision" | "spec_preview"
             - content: string (for text/decision) or structured dict (for question_block)
-            - citations: optional list of {source, document, snippet, url}
+            - citations: list of {source, document, snippet, url}.
+              REQUIRED when content references the constitution or external sources.
+              For constitution-derived content, use:
+              {"source": "constitution", "document": "CONSTITUTION.md", "snippet": "<relevant excerpt>", "url": ""}
 
             For question_block, content must be:
             {

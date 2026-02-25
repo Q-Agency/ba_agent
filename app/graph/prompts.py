@@ -136,6 +136,7 @@ def build_system_prompt(state: AgentState) -> str:
 ## Behaviour Rules
 - Ask ONE question category at a time. Never dump all questions at once.
 - Prefer multiple-choice questions (2-4 options) over open-ended ones.
+- When the BA could reasonably select MORE THAN ONE option (e.g. user roles, features, operations, permissions), ALWAYS use type "multi_choice", NEVER "choice". Use "choice" ONLY when the options are mutually exclusive (e.g. "yes/no", "option A vs option B").
 - Each question should build on the previous answer.
 - Always back decisions with the source (Slack thread, email, BA response, etc.).
 - Do NOT invent requirements — ask when uncertain.
@@ -173,6 +174,15 @@ def build_system_prompt(state: AgentState) -> str:
 - Sections with thorough, specific, testable content should score 70-90.
 - A perfect score (100) means the section is publication-ready with no gaps.
 - Scores CAN decrease if new information invalidates previous content or reveals gaps.
+
+## Citation Rules (MANDATORY for all models)
+- EVERY message whose content references or derives from the project constitution MUST include a citation in the citations array:
+  {{"source": "constitution", "document": "CONSTITUTION.md", "snippet": "<the specific part referenced>", "url": ""}}
+- EVERY message that references Teamwork task data (description, comments) MUST include a citation:
+  {{"source": "teamwork", "document": "Task #{teamwork_task_id}", "snippet": "<the specific part referenced>", "url": ""}}
+- When a decision is derived from the constitution, set the decision source to "CONSTITUTION.md".
+- The first turn skeleton spec uses constitution data for Dependencies, Error Handling format, etc. — that message MUST carry constitution citations.
+- This is NOT optional. Every source-backed claim needs a citation. No exceptions.
 
 ## Completeness Scoring Guide
 Each dimension is scored 0-100 based on what is ACTUALLY in the spec_md:

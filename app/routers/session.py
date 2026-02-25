@@ -115,12 +115,15 @@ async def _run_agent_turn(
     session_id: str,
     input_messages: list,
     initial_state: dict | None = None,
+    state_overrides: dict | None = None,
     model_id: str = DEFAULT_MODEL,
 ) -> tuple[list[dict], dict]:
     """
     Run one agent turn. Returns (frontend_messages, updates_dict).
 
     - initial_state: provided only on session start (sets session metadata)
+    - state_overrides: DB-sourced values (completeness, spec_md, decisions) to
+      inject into the graph state so build_system_prompt sees current data.
     - subsequent turns just pass new messages; LangGraph resumes from checkpoint
     """
     config = _make_config(session_id, model_id)
@@ -128,6 +131,8 @@ async def _run_agent_turn(
     graph_input: dict = {"messages": input_messages}
     if initial_state:
         graph_input.update(initial_state)
+    if state_overrides:
+        graph_input.update(state_overrides)
 
     final_state: AgentState = await graph.ainvoke(graph_input, config)
 
@@ -163,14 +168,18 @@ async def _run_agent_turn(
             decisions = json.loads(decisions)
         except (json.JSONDecodeError, TypeError):
             decisions = []
-    if isinstance(spec_md, str) and spec_md.startswith("{"):
-        # spec_md should be plain markdown, not JSON — leave it as-is unless it's a JSON wrapper
-        try:
-            parsed = json.loads(spec_md)
-            if isinstance(parsed, str):
-                spec_md = parsed
-        except (json.JSONDecodeError, TypeError):
-            pass
+    if isinstance(spec_md, str):
+        # Some models return spec_md as a JSON-wrapped string — unwrap it
+        if spec_md.startswith(("{", '"')):
+            try:
+                parsed = json.loads(spec_md)
+                if isinstance(parsed, str):
+                    spec_md = parsed
+            except (json.JSONDecodeError, TypeError):
+                pass
+        # LLMs often return literal \n instead of real newlines in tool args
+        if isinstance(spec_md, str) and "\\n" in spec_md:
+            spec_md = spec_md.replace("\\n", "\n")
     if isinstance(new_completeness, str):
         try:
             new_completeness = json.loads(new_completeness)
@@ -362,11 +371,22 @@ async def send_message(body: SendMessageRequest, request: Request):
         content=body.content,
     )
 
-    # 2. Run agent (LangGraph resumes from checkpoint automatically)
+    # 2. Run agent — inject DB-sourced state so build_system_prompt sees
+    #    current completeness/spec_md (LangGraph checkpoint doesn't store these).
     graph = _graph(request)
     user_msg = HumanMessage(content=body.content)
+    db_completeness = session_row.get("completeness") or DEFAULT_COMPLETENESS
+    if isinstance(db_completeness, str):
+        db_completeness = json.loads(db_completeness)
     raw_messages, updates = await _run_agent_turn(
-        graph, body.sessionId, [user_msg], model_id=body.model
+        graph,
+        body.sessionId,
+        [user_msg],
+        state_overrides={
+            "completeness": dict(db_completeness),
+            "spec_md": session_row.get("spec_md"),
+        },
+        model_id=body.model,
     )
 
     # 3. Persist agent messages + update session
@@ -463,8 +483,18 @@ async def review_session(body: ReviewRequest, request: Request):
         feedback_msg = HumanMessage(
             content=f"[REVISION REQUESTED] {body.feedback}\nPlease update the SPEC accordingly."
         )
+        db_completeness = session_row.get("completeness") or DEFAULT_COMPLETENESS
+        if isinstance(db_completeness, str):
+            db_completeness = json.loads(db_completeness)
         raw_messages, updates = await _run_agent_turn(
-            graph, body.sessionId, [feedback_msg], model_id=body.model
+            graph,
+            body.sessionId,
+            [feedback_msg],
+            state_overrides={
+                "completeness": dict(db_completeness),
+                "spec_md": session_row.get("spec_md"),
+            },
+            model_id=body.model,
         )
         messages = await _persist_agent_messages(body.sessionId, raw_messages)
         await db.update_session(

@@ -33,13 +33,17 @@ def build_graph(checkpointer: AsyncPostgresSaver):
 
 def extract_finalize_args(state: AgentState) -> dict | None:
     """
-    After graph.ainvoke, find the finalize_turn tool call in the last AI
-    message and return its args. Returns None if the agent didn't call it
-    (fallback: treat last message text as plain response).
+    After graph.ainvoke, find the finalize_turn tool call in the CURRENT turn's
+    AI messages (after the last HumanMessage). Returns None if the agent didn't
+    call it this turn (fallback: treat last message text as plain response).
     """
-    from langchain_core.messages import AIMessage
+    from langchain_core.messages import AIMessage, HumanMessage
 
     for msg in reversed(state["messages"]):
+        # Stop at the turn boundary — don't pick up stale finalize_turn
+        # from a previous turn's AIMessage.
+        if isinstance(msg, HumanMessage):
+            break
         if not isinstance(msg, AIMessage):
             continue
         for tc in (msg.tool_calls or []):
