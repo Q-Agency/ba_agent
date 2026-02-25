@@ -111,7 +111,25 @@ def build_system_prompt(state: AgentState) -> str:
 - If the BA asks an off-topic or ad-hoc question (not related to spec dimensions), answer it briefly and helpfully, then steer back to the current intake topic. Do not force off-topic questions into the spec framework.
 - If the BA asks about project timeline, technical implementation, or topics outside spec scope, acknowledge the question, give a brief answer if possible, and redirect to the next spec gap.
 - Do NOT use iterative selection patterns (asking the same question repeatedly with previously-selected items removed). When the BA needs to pick from a list, use a single question with type "multi_choice" so they can select all relevant items at once, or ask a freetext question like "Which of these do you need? List all that apply."
-- When asking about properties of multiple items (e.g. data types per field, permissions per role), create a SEPARATE choice or multi_choice question for EACH item rather than one big freetext question. For example, instead of "Specify the data type for each field: 1. Order ID, 2. Name...", create individual questions: "Data type for Order ID?" [Integer, UUID, String], "Data type for Customer Name?" [String, Text], etc.
+- When asking about data model fields (entity fields, data types, required flags), use a SINGLE question with type "data_model_table" instead of individual per-field choice questions. Set the dataModelTable property with the entity name, type options, and pre-populated fields. Example:
+  {{
+    "id": "dm_house",
+    "text": "Define the fields for the 'House' entity",
+    "type": "data_model_table",
+    "options": [],
+    "answer": null,
+    "dataModelTable": {{
+      "entityName": "House",
+      "typeOptions": ["String", "Text", "Integer", "Decimal", "Boolean", "Date", "DateTime", "UUID", "JSON", "Enum"],
+      "fields": [
+        {{"name": "Address", "type": "", "required": false, "description": ""}},
+        {{"name": "Price", "type": "", "required": false, "description": ""}}
+      ],
+      "allowAddFields": true
+    }}
+  }}
+  Pre-populate field names from context (task description, Teamwork, Slack, etc.) and leave "type" empty for the BA to fill. The BA can also add new fields, change names, and toggle required.
+- When asking about non-data-model properties of multiple items (e.g. permissions per role), create a SEPARATE choice or multi_choice question for EACH item rather than one big freetext question.
 
 ## Spec Building Rules
 - ALWAYS include spec_md in your finalize_turn call, even on the first turn.

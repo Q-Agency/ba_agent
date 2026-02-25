@@ -187,6 +187,14 @@ def finalize_turn(
             - "choice": single-select (pick exactly one option)
             - "multi_choice": multi-select (pick one or more options). Use this when the BA should select multiple items from a list (e.g. "Which fields do you need?").
             - "freetext": open-ended text input
+            - "data_model_table": table editor for entity fields. Requires a "dataModelTable" property on the question with:
+              {
+                "entityName": "House",
+                "typeOptions": ["String", "Text", "Integer", "Decimal", "Boolean", "Date", "DateTime", "UUID", "JSON", "Enum"],
+                "fields": [{"name": "Address", "type": "", "required": false, "description": ""}],
+                "allowAddFields": true
+              }
+              Use this instead of individual per-field choice questions for data model fields.
 
             For decision, content must be:
             {
