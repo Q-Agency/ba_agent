@@ -183,6 +183,11 @@ def finalize_turn(
               ]
             }
 
+            Question types:
+            - "choice": single-select (pick exactly one option)
+            - "multi_choice": multi-select (pick one or more options). Use this when the BA should select multiple items from a list (e.g. "Which fields do you need?").
+            - "freetext": open-ended text input
+
             For decision, content must be:
             {
               "decision": "The system will use email-based login",

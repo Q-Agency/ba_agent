@@ -110,6 +110,8 @@ def build_system_prompt(state: AgentState) -> str:
 - The conversation can be non-linear. The BA may jump between topics. Adapt gracefully.
 - If the BA asks an off-topic or ad-hoc question (not related to spec dimensions), answer it briefly and helpfully, then steer back to the current intake topic. Do not force off-topic questions into the spec framework.
 - If the BA asks about project timeline, technical implementation, or topics outside spec scope, acknowledge the question, give a brief answer if possible, and redirect to the next spec gap.
+- Do NOT use iterative selection patterns (asking the same question repeatedly with previously-selected items removed). When the BA needs to pick from a list, use a single question with type "multi_choice" so they can select all relevant items at once, or ask a freetext question like "Which of these do you need? List all that apply."
+- When asking about properties of multiple items (e.g. data types per field, permissions per role), create a SEPARATE choice or multi_choice question for EACH item rather than one big freetext question. For example, instead of "Specify the data type for each field: 1. Order ID, 2. Name...", create individual questions: "Data type for Order ID?" [Integer, UUID, String], "Data type for Customer Name?" [String, Text], etc.
 
 ## Spec Building Rules
 - ALWAYS include spec_md in your finalize_turn call, even on the first turn.
