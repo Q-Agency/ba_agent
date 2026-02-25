@@ -37,13 +37,18 @@ async def lifespan(app: FastAPI):
     # Use a connection pool so each checkpoint operation gets a fresh connection.
     # A single long-lived connection can be closed by Supabase/pooler (idle timeout
     # or transaction-mode), causing "the connection is closed" on later requests.
+    conninfo = settings.database_url
+    if "connect_timeout" not in conninfo:
+        sep = "&" if "?" in conninfo else "?"
+        conninfo = f"{conninfo}{sep}connect_timeout=10"
     pool = AsyncConnectionPool(
-        conninfo=settings.database_url,
+        conninfo=conninfo,
         kwargs=dict(autocommit=True, prepare_threshold=0, row_factory=dict_row),
         min_size=1,
         max_size=10,
+        open=False,
     )
-    await pool.open()
+    await pool.open(wait=True, timeout=30)
     try:
         checkpointer = AsyncPostgresSaver(conn=pool)
         await checkpointer.setup()

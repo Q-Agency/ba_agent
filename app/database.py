@@ -17,20 +17,31 @@ from app.config import settings
 _pool: AsyncConnectionPool | None = None
 
 
+def _conninfo_with_timeout(conninfo: str, timeout_seconds: int = 10) -> str:
+    """Ensure connect_timeout is set so DB connection fails fast instead of hanging."""
+    if "connect_timeout" in conninfo:
+        return conninfo
+    sep = "&" if "?" in conninfo else "?"
+    return f"{conninfo}{sep}connect_timeout={timeout_seconds}"
+
+
 async def get_pool() -> AsyncConnectionPool:
     global _pool
     if _pool is None:
+        conninfo = _conninfo_with_timeout(settings.database_url)
         _pool = AsyncConnectionPool(
-            conninfo=settings.database_url,
+            conninfo=conninfo,
             min_size=1,
             max_size=10,
             kwargs={"row_factory": dict_row},
             open=False,
         )
-        await _pool.open()
-        # Auto-migrate: add model column if missing
+        await _pool.open(wait=True, timeout=30)
+        # Auto-migrate: add columns/tables if missing.
+        # Use statement_timeout to avoid hanging on locks held by dead connections.
         try:
             async with _pool.connection() as conn:
+                await conn.execute("SET statement_timeout = '5s'")
                 await conn.execute(
                     "ALTER TABLE ba_sessions ADD COLUMN IF NOT EXISTS model TEXT DEFAULT 'claude-sonnet-4-6'"
                 )
@@ -48,8 +59,9 @@ async def get_pool() -> AsyncConnectionPool:
                 await conn.execute(
                     "ALTER TABLE ba_project_settings ADD COLUMN IF NOT EXISTS constitution_status TEXT DEFAULT NULL"
                 )
+                await conn.execute("SET statement_timeout = '0'")
         except Exception:
-            pass  # column/table already exists or table not yet created
+            pass  # column/table already exists, or lock timeout — safe to skip
     return _pool
 
 
