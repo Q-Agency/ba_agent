@@ -22,9 +22,6 @@ class Settings(BaseSettings):
     teamwork_api_key: str = ""
     teamwork_domain: str = ""  # e.g. "yourcompany.teamwork.com"
 
-    # Slack (optional)
-    slack_bot_token: str = ""
-
     # CORS
     cors_origins: str = "http://localhost:5173,http://localhost:3000"
 

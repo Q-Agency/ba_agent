@@ -1,9 +1,7 @@
 """
 Agent tools.
 
-External search tools (Teamwork, Slack, Email, Google Drive) are implemented
-as stubs with clear TODO markers. Wire them up by filling in the HTTP calls.
-
+search_teamwork fetches task context from Teamwork.
 finalize_turn is a special "output" tool — when the agent calls it, the graph
 ends and the router extracts the structured response from the tool call args.
 It is never executed; the graph routing detects it and terminates.
@@ -72,79 +70,6 @@ async def search_teamwork(task_id: str = "", query: str = "") -> str:
             })
         except Exception as e:
             return json.dumps({"error": str(e)})
-
-
-@tool
-async def search_slack(query: str, channel: str = "") -> str:
-    """
-    Search Slack for relevant messages and threads.
-    Use to find prior discussions, decisions, or context about this feature.
-
-    Args:
-        query: Search keywords (e.g. "user authentication login flow")
-        channel: Optional channel name to restrict search
-    """
-    if not settings.slack_bot_token:
-        return json.dumps({
-            "results": [],
-            "note": "Slack not configured — set SLACK_BOT_TOKEN in .env",
-        })
-
-    search_query = f"{query} in:{channel}" if channel else query
-
-    async with httpx.AsyncClient(timeout=15) as client:
-        try:
-            r = await client.get(
-                "https://slack.com/api/search.messages",
-                headers={"Authorization": f"Bearer {settings.slack_bot_token}"},
-                params={"query": search_query, "count": 5, "highlight": False},
-            )
-            data = r.json()
-            matches = data.get("messages", {}).get("matches", [])
-            return json.dumps([
-                {
-                    "channel": m.get("channel", {}).get("name"),
-                    "author": m.get("username"),
-                    "text": m.get("text"),
-                    "timestamp": m.get("ts"),
-                    "permalink": m.get("permalink"),
-                }
-                for m in matches
-            ])
-        except Exception as e:
-            return json.dumps({"error": str(e)})
-
-
-@tool
-async def search_email(query: str) -> str:
-    """
-    Search email threads for context about this feature or requirement.
-
-    Args:
-        query: Search keywords (e.g. "feature request login reset password")
-    """
-    # TODO: Implement Gmail API or Exchange search
-    # Wire up OAuth token + Gmail API search endpoint here
-    return json.dumps({
-        "results": [],
-        "note": "Email search not yet implemented — wire up Gmail/Exchange API",
-    })
-
-
-@tool
-async def search_gdrive(query: str) -> str:
-    """
-    Search Google Drive for relevant documents, PRDs, or design docs.
-
-    Args:
-        query: Search keywords (e.g. "authentication PRD design")
-    """
-    # TODO: Implement Google Drive API search
-    # Wire up service account or OAuth + Drive files.list with q parameter
-    return json.dumps({
-        "results": [],
-        "note": "Google Drive search not yet implemented — wire up Drive API",
-    })
 
 
 # ---------------------------------------------------------------------------
@@ -223,8 +148,5 @@ def finalize_turn(
 # All tools the agent can use
 AGENT_TOOLS = [
     search_teamwork,
-    search_slack,
-    search_email,
-    search_gdrive,
     finalize_turn,
 ]

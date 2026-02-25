@@ -17,8 +17,7 @@ _COMPLETENESS_LABELS = {
 _PHASE_INSTRUCTIONS = {
     "research": (
         "You are in the RESEARCH phase. "
-        "Use search_teamwork, search_slack, search_email, and search_gdrive to gather "
-        "as much context as possible before asking questions. "
+        "Use search_teamwork to gather as much context as possible before asking questions. "
         "Once you have enough background (or tools return empty results), "
         "transition to questioning by asking the first question_block. "
         "Even in this phase, initialize the spec_md with a skeleton containing "
@@ -152,7 +151,7 @@ Each dimension is scored 0-100 based on what is ACTUALLY in the spec_md:
 - **data_model (0-100):** 0 = no data entities. 50 = entities named but no fields. 80 = entities with key fields and relationships. 100 = complete model with types, constraints, and cardinality.
 
 ## Tool Usage
-- Use search tools early to gather context before asking questions.
+- Use search_teamwork early to gather task context before asking questions.
 - Call finalize_turn as the LAST action every turn — always, even after tool use.
 - Never call finalize_turn alongside other tools in the same turn.
 - ALWAYS provide the full completeness map (all 6 keys, integer scores 0-100).

@@ -21,16 +21,13 @@ from langchain_openai import ChatOpenAI
 from app.config import settings
 from app.graph.prompts import build_system_prompt
 from app.graph.state import AgentState
-from app.graph.tools import AGENT_TOOLS, search_teamwork, search_slack, search_email, search_gdrive
+from app.graph.tools import AGENT_TOOLS, search_teamwork
 
 logger = logging.getLogger(__name__)
 
 # Tool map for execution (all tools except finalize_turn)
 _EXECUTABLE_TOOLS = {
     "search_teamwork": search_teamwork,
-    "search_slack": search_slack,
-    "search_email": search_email,
-    "search_gdrive": search_gdrive,
 }
 
 # ---------------------------------------------------------------------------
