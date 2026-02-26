@@ -62,6 +62,9 @@ async def get_pool() -> AsyncConnectionPool:
                 await conn.execute(
                     "ALTER TABLE ba_project_settings ADD COLUMN IF NOT EXISTS name TEXT"
                 )
+                await conn.execute(
+                    "ALTER TABLE ba_sessions ADD COLUMN IF NOT EXISTS project_id TEXT DEFAULT ''"
+                )
                 await conn.execute("SET statement_timeout = '0'")
         except Exception:
             pass  # column/table already exists, or lock timeout — safe to skip
@@ -110,6 +113,7 @@ async def create_session(
     teamwork_task_id: str,
     task_title: str,
     project_name: str,
+    project_id: str = "",
     model: str = "claude-sonnet-4-6",
 ) -> dict:
     pool = await get_pool()
@@ -119,9 +123,9 @@ async def create_session(
             """
             INSERT INTO ba_sessions
                 (id, task_id, teamwork_task_id, teamwork_task_title,
-                 project_name, status, created_at, updated_at,
+                 project_name, project_id, status, created_at, updated_at,
                  created_by, spec_md, completeness, model)
-            VALUES (%s, %s, %s, %s, %s, 'in_progress', %s, %s, 'agent', NULL, %s, %s)
+            VALUES (%s, %s, %s, %s, %s, %s, 'in_progress', %s, %s, 'agent', NULL, %s, %s)
             ON CONFLICT (id) DO NOTHING
             """,
             (
@@ -130,6 +134,7 @@ async def create_session(
                 teamwork_task_id,
                 task_title,
                 project_name,
+                project_id,
                 now,
                 now,
                 json.dumps(DEFAULT_COMPLETENESS),
@@ -142,6 +147,7 @@ async def create_session(
         "teamwork_task_id": teamwork_task_id,
         "teamwork_task_title": task_title,
         "project_name": project_name,
+        "project_id": project_id,
         "status": "in_progress",
         "created_at": now,
         "updated_at": now,

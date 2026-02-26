@@ -23,6 +23,9 @@ class Settings(BaseSettings):
     teamwork_api_key: str = ""
     teamwork_domain: str = ""  # e.g. "yourcompany.teamwork.com"
 
+    # GitHub (optional — for committing SPEC.md as PR on approval)
+    github_token: str = ""
+
     # CORS
     cors_origins: str = "http://localhost:5173,http://localhost:3000"
 

@@ -334,6 +334,7 @@ async def start_session(body: StartSessionRequest, request: Request):
         teamwork_task_id=body.teamworkTaskId,
         task_title=body.taskTitle,
         project_name=body.projectName,
+        project_id=body.projectId,
         model=body.model,
     )
 
@@ -492,30 +493,126 @@ async def review_session(body: ReviewRequest, request: Request):
         raise HTTPException(status_code=404, detail="Session not found")
 
     if body.action == "approve":
-        await db.update_session(body.sessionId, status="approved")
+        from app.services.github import create_spec_pr, parse_github_url
+        from app.schemas.api import ApprovalStep
 
-        # Push approved SPEC to Teamwork (upload file + move column)
         tw_task_id = session_row.get("teamwork_task_id", "")
         spec_md = session_row.get("spec_md", "")
         task_title = session_row.get("teamwork_task_title", "spec")
 
-        if tw_task_id and spec_md:
+        # ── Pre-flight checks ─────────────────────────────────────────
+        if not spec_md:
+            raise HTTPException(status_code=422, detail="Cannot approve: SPEC is empty.")
+
+        if not settings.github_token:
+            raise HTTPException(
+                status_code=422,
+                detail="Cannot approve: GITHUB_TOKEN is not configured on the server.",
+            )
+
+        project_id = session_row.get("project_id", "")
+        if not project_id:
+            raise HTTPException(
+                status_code=422,
+                detail="Cannot approve: session has no project_id. Try resetting and starting a new session.",
+            )
+
+        settings_row = await db.get_project_settings(project_id)
+        constitution_url = (settings_row or {}).get("constitution_url", "")
+        repo_info = parse_github_url(constitution_url) if constitution_url else None
+        if not repo_info:
+            raise HTTPException(
+                status_code=422,
+                detail="Cannot approve: could not determine GitHub repo from constitution URL.",
+            )
+
+        steps: list[ApprovalStep] = []
+        pr_url: str | None = None
+
+        # ── Step 1: GitHub PR (mandatory — blocks approval on failure) ─
+        try:
+            result = await create_spec_pr(
+                owner=repo_info["owner"],
+                repo=repo_info["repo"],
+                base_branch=repo_info["branch"],
+                teamwork_task_id=tw_task_id,
+                task_title=task_title,
+                spec_md=spec_md,
+                teamwork_domain=settings.teamwork_domain,
+            )
+            pr_url = result["pr_url"]
+            logger.info("Created GitHub PR for task %s: %s", tw_task_id, pr_url)
+            steps.append(ApprovalStep(
+                id="github_pr", label="Create GitHub Pull Request",
+                status="success", detail=pr_url,
+            ))
+        except Exception as exc:
+            logger.error("GitHub PR failed for task %s: %s", tw_task_id, exc)
+            steps.append(ApprovalStep(
+                id="github_pr", label="Create GitHub Pull Request",
+                status="failed", detail=str(exc),
+            ))
+            return ReviewResponse(
+                status="revision_requested",
+                session=_db_row_to_session(session_row),
+                steps=steps,
+            )
+
+        # ── Step 2: Mark session as approved ──────────────────────────
+        await db.update_session(body.sessionId, status="approved")
+        steps.append(ApprovalStep(
+            id="update_status", label="Mark session as approved",
+            status="success",
+        ))
+
+        # ── Step 3: Upload SPEC to Teamwork ───────────────────────────
+        if tw_task_id:
             try:
                 await upload_spec_to_task(tw_task_id, spec_md, task_title)
                 logger.info("Uploaded SPEC to Teamwork task %s", tw_task_id)
+                steps.append(ApprovalStep(
+                    id="teamwork_upload", label="Upload SPEC to Teamwork",
+                    status="success",
+                ))
             except Exception as exc:
                 logger.error("Failed to upload SPEC to Teamwork task %s: %s", tw_task_id, exc)
+                steps.append(ApprovalStep(
+                    id="teamwork_upload", label="Upload SPEC to Teamwork",
+                    status="failed", detail=str(exc),
+                ))
+        else:
+            steps.append(ApprovalStep(
+                id="teamwork_upload", label="Upload SPEC to Teamwork",
+                status="skipped", detail="No Teamwork task ID",
+            ))
 
+        # ── Step 4: Move Teamwork task to Ready for Design ────────────
+        if tw_task_id:
             try:
                 await move_task_to_stage(tw_task_id)
                 logger.info("Moved Teamwork task %s to Ready for Design", tw_task_id)
+                steps.append(ApprovalStep(
+                    id="teamwork_move", label="Move task to Ready for Design",
+                    status="success",
+                ))
             except Exception as exc:
-                logger.error("Failed to move Teamwork task %s to Ready for Design: %s", tw_task_id, exc)
+                logger.error("Failed to move Teamwork task %s: %s", tw_task_id, exc)
+                steps.append(ApprovalStep(
+                    id="teamwork_move", label="Move task to Ready for Design",
+                    status="failed", detail=str(exc),
+                ))
+        else:
+            steps.append(ApprovalStep(
+                id="teamwork_move", label="Move task to Ready for Design",
+                status="skipped", detail="No Teamwork task ID",
+            ))
 
         updated_row = await db.get_session(body.sessionId)
         return ReviewResponse(
             status="approved",
             session=_db_row_to_session(updated_row),
+            pr_url=pr_url,
+            steps=steps,
         )
 
     # request_changes — feed feedback back into agent

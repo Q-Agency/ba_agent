@@ -97,10 +97,19 @@ class MessagesResponse(BaseModel):
     messages: list[Message]
 
 
+class ApprovalStep(BaseModel):
+    id: str
+    label: str
+    status: Literal["success", "failed", "skipped"]
+    detail: str | None = None
+
+
 class ReviewResponse(BaseModel):
     status: Literal["approved", "revision_requested"]
     session: Session | None = None
     messages: list[Message] | None = None
+    pr_url: str | None = None
+    steps: list[ApprovalStep] | None = None
 
 
 class ModelInfo(BaseModel):
