@@ -73,8 +73,6 @@ def _base_url() -> str:
     return f"https://{settings.teamwork_domain}/projects/api/v3"
 
 
-ALLOWED_PROJECT_IDS = ["820301", "822891"]
-
 # Workflow & stage IDs for the shared "test" workflow
 WORKFLOW_ID = 12487
 STAGE_READY_FOR_DESIGN = 64704
@@ -154,9 +152,13 @@ async def move_task_to_stage(task_id: str, stage_id: int = STAGE_READY_FOR_DESIG
 
 
 async def _fetch_teamwork_projects() -> list[dict]:
+    connected_ids = await db.get_connected_project_ids()
+    if not connected_ids:
+        return []
+
     async with httpx.AsyncClient(headers=_teamwork_headers(), timeout=20) as client:
         projects_raw = []
-        for pid in ALLOWED_PROJECT_IDS:
+        for pid in connected_ids:
             r = await client.get(f"{_base_url()}/projects/{pid}.json")
             if r.is_success:
                 p = r.json().get("project", {})
@@ -166,8 +168,6 @@ async def _fetch_teamwork_projects() -> list[dict]:
         projects = []
         for p in projects_raw:
             pid = p.get("id")
-            if str(pid) not in ALLOWED_PROJECT_IDS:
-                continue
             # Fetch task lists for each project
             tlr = await client.get(f"{_base_url()}/projects/{pid}/tasklists.json")
             task_lists = []
@@ -272,3 +272,109 @@ async def get_project(body: ProjectRequest) -> dict:
     except Exception as exc:
         logger.exception("Teamwork project fetch failed: %s", exc)
         raise HTTPException(status_code=502, detail=f"Teamwork API error: {exc}")
+
+
+@router.post("/teamwork/connect")
+async def connect_project(body: ProjectRequest) -> dict:
+    """Connect a Teamwork project: persist to DB and return its full tree."""
+    if not settings.teamwork_api_key:
+        project = MOCK_PROJECTS[0]
+        await db.connect_project(project["id"], name=project["name"])
+        return {"project": project}
+
+    try:
+        async with httpx.AsyncClient(headers=_teamwork_headers(), timeout=20) as client:
+            # Fetch project metadata from Teamwork
+            r = await client.get(f"{_base_url()}/projects/{body.projectId}.json")
+            r.raise_for_status()
+            p = r.json().get("project", {})
+            if not p:
+                raise HTTPException(status_code=404, detail="Project not found in Teamwork")
+
+            pid = str(p.get("id"))
+            project_name = p.get("name", "")
+
+            # Persist as connected project
+            await db.connect_project(pid, name=project_name)
+
+            # Fetch full task tree (same logic as _fetch_teamwork_projects for a single project)
+            tlr = await client.get(f"{_base_url()}/projects/{pid}/tasklists.json")
+            task_lists = []
+            for tl in (tlr.json().get("tasklists", []) if tlr.is_success else []):
+                tl_id = tl.get("id")
+                tr = await client.get(
+                    f"{_base_url()}/tasklists/{tl_id}/tasks.json",
+                    params={"pageSize": 100},
+                )
+                tasks = [
+                    {
+                        "id": str(t.get("id")),
+                        "teamwork_task_id": str(t.get("id")),
+                        "title": t.get("name"),
+                        "description": t.get("description"),
+                        "status": "new",
+                        "session_id": None,
+                        "spec_md": None,
+                        "completeness": {
+                            "user_roles": 0,
+                            "business_rules": 0,
+                            "acceptance_criteria": 0,
+                            "scope_boundaries": 0,
+                            "error_handling": 0,
+                            "data_model": 0,
+                        },
+                    }
+                    for t in (tr.json().get("tasks", []) if tr.is_success else [])
+                ]
+                task_lists.append({"id": str(tl_id), "name": tl.get("name"), "tasks": tasks})
+
+            project = {
+                "id": pid,
+                "teamwork_project_id": pid,
+                "name": project_name,
+                "description": p.get("description", ""),
+                "task_lists": task_lists,
+            }
+
+            # Enrich with session data
+            all_tw_ids = [
+                t["teamwork_task_id"]
+                for tl in project["task_lists"]
+                for t in tl["tasks"]
+            ]
+            if all_tw_ids:
+                sessions = await db.get_sessions_by_teamwork_ids(all_tw_ids)
+                status_map = {"in_progress": "has_session", "spec_ready": "spec_ready", "approved": "approved"}
+                for tl in project["task_lists"]:
+                    for t in tl["tasks"]:
+                        sess = sessions.get(t["teamwork_task_id"])
+                        if sess:
+                            t["session_id"] = sess["id"]
+                            t["status"] = status_map.get(sess["status"], "has_session")
+                            t["spec_md"] = sess.get("spec_md")
+                            t["completeness"] = sess.get("completeness", t["completeness"])
+                            if sess.get("updated_at"):
+                                t["updated_at"] = sess["updated_at"]
+
+            # Enrich with constitution settings
+            ps = await db.get_project_settings(pid)
+            project["constitution_url"] = ps.get("constitution_url") if ps else None
+            project["constitution_status"] = ps.get("constitution_status") if ps else None
+
+            return {"project": project}
+    except httpx.HTTPStatusError as exc:
+        raise HTTPException(status_code=exc.response.status_code, detail=str(exc))
+    except HTTPException:
+        raise
+    except Exception as exc:
+        logger.exception("Teamwork connect failed: %s", exc)
+        raise HTTPException(status_code=502, detail=f"Teamwork API error: {exc}")
+
+
+@router.post("/teamwork/disconnect")
+async def disconnect_project(body: ProjectRequest) -> dict:
+    """Disconnect a Teamwork project: remove from DB."""
+    deleted = await db.disconnect_project(body.projectId)
+    if not deleted:
+        raise HTTPException(status_code=404, detail="Project not connected")
+    return {"ok": True}

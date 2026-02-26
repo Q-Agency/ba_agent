@@ -59,6 +59,9 @@ async def get_pool() -> AsyncConnectionPool:
                 await conn.execute(
                     "ALTER TABLE ba_project_settings ADD COLUMN IF NOT EXISTS constitution_status TEXT DEFAULT NULL"
                 )
+                await conn.execute(
+                    "ALTER TABLE ba_project_settings ADD COLUMN IF NOT EXISTS name TEXT"
+                )
                 await conn.execute("SET statement_timeout = '0'")
         except Exception:
             pass  # column/table already exists, or lock timeout — safe to skip
@@ -351,6 +354,51 @@ async def upsert_project_settings(
             )
             row = await cur.fetchone()
     return dict(row)
+
+
+async def get_connected_project_ids() -> list[str]:
+    """Return all connected (registered) Teamwork project IDs."""
+    pool = await get_pool()
+    async with pool.connection() as conn:
+        async with conn.cursor(row_factory=dict_row) as cur:
+            await cur.execute(
+                "SELECT teamwork_project_id FROM ba_project_settings ORDER BY created_at ASC"
+            )
+            rows = await cur.fetchall()
+    return [row["teamwork_project_id"] for row in rows]
+
+
+async def connect_project(teamwork_project_id: str, *, name: str | None = None) -> dict:
+    """Register a Teamwork project as connected. Upserts into ba_project_settings."""
+    pool = await get_pool()
+    now = datetime.now(timezone.utc).isoformat()
+    async with pool.connection() as conn:
+        async with conn.cursor(row_factory=dict_row) as cur:
+            await cur.execute(
+                """
+                INSERT INTO ba_project_settings
+                    (teamwork_project_id, name, created_at, updated_at)
+                VALUES (%s, %s, %s, %s)
+                ON CONFLICT (teamwork_project_id) DO UPDATE SET
+                    name = COALESCE(EXCLUDED.name, ba_project_settings.name),
+                    updated_at = EXCLUDED.updated_at
+                RETURNING *
+                """,
+                (teamwork_project_id, name, now, now),
+            )
+            row = await cur.fetchone()
+    return dict(row)
+
+
+async def disconnect_project(teamwork_project_id: str) -> bool:
+    """Remove a project from connected projects. Returns True if row existed."""
+    pool = await get_pool()
+    async with pool.connection() as conn:
+        cur = await conn.execute(
+            "DELETE FROM ba_project_settings WHERE teamwork_project_id = %s",
+            (teamwork_project_id,),
+        )
+        return cur.rowcount > 0
 
 
 async def get_messages(session_id: str) -> list[dict]:
