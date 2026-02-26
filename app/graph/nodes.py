@@ -59,6 +59,9 @@ MODEL_REGISTRY: dict[str, dict[str, str]] = {
 
 DEFAULT_MODEL = "claude-sonnet-4-6"
 
+if DEFAULT_MODEL not in MODEL_REGISTRY:
+    raise RuntimeError(f"DEFAULT_MODEL {DEFAULT_MODEL!r} not found in MODEL_REGISTRY")
+
 # Cache LLM instances so we don't re-create them on every call
 _llm_cache: dict[str, Any] = {}
 

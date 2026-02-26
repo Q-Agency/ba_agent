@@ -5,7 +5,7 @@ Mirrors the TypeScript types in src/types/intake.ts.
 from __future__ import annotations
 
 from typing import Any, Literal
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 
 # ---------------------------------------------------------------------------
@@ -53,34 +53,34 @@ class Message(BaseModel):
 
 
 class StartSessionRequest(BaseModel):
-    taskId: str
-    teamworkTaskId: str = ""
-    taskTitle: str
-    taskDescription: str = ""
-    projectName: str
-    projectId: str = ""  # Teamwork project ID — used to look up constitution
-    model: str = "claude-sonnet-4-6"
+    taskId: str = Field(..., max_length=200)
+    teamworkTaskId: str = Field(default="", max_length=200)
+    taskTitle: str = Field(..., max_length=500)
+    taskDescription: str = Field(default="", max_length=10000)
+    projectName: str = Field(..., max_length=200)
+    projectId: str = Field(default="", max_length=200)
+    model: str = Field(default="claude-sonnet-4-6", max_length=100)
 
 
 class SendMessageRequest(BaseModel):
-    sessionId: str
-    content: str
-    model: str = "claude-sonnet-4-6"
+    sessionId: str = Field(..., max_length=200)
+    content: str = Field(..., max_length=50000)
+    model: str = Field(default="claude-sonnet-4-6", max_length=100)
 
 
 class GetSessionRequest(BaseModel):
-    sessionId: str
+    sessionId: str = Field(..., max_length=200)
 
 
 class ReviewRequest(BaseModel):
-    sessionId: str
+    sessionId: str = Field(..., max_length=200)
     action: Literal["approve", "request_changes"]
-    feedback: str | None = None
-    model: str = "claude-sonnet-4-6"
+    feedback: str | None = Field(default=None, max_length=50000)
+    model: str = Field(default="claude-sonnet-4-6", max_length=100)
 
 
 class ResetSessionRequest(BaseModel):
-    sessionId: str
+    sessionId: str = Field(..., max_length=200)
 
 
 # ---------------------------------------------------------------------------

@@ -10,8 +10,9 @@ from __future__ import annotations
 import logging
 from contextlib import asynccontextmanager
 
-from fastapi import FastAPI
+from fastapi import Depends, FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.security import APIKeyHeader
 from langgraph.checkpoint.postgres.aio import AsyncPostgresSaver
 from psycopg.rows import dict_row
 from psycopg_pool import AsyncConnectionPool
@@ -44,8 +45,8 @@ async def lifespan(app: FastAPI):
     pool = AsyncConnectionPool(
         conninfo=conninfo,
         kwargs=dict(autocommit=True, prepare_threshold=0, row_factory=dict_row),
-        min_size=1,
-        max_size=10,
+        min_size=2,
+        max_size=20,
         open=False,
     )
     await pool.open(wait=True, timeout=30)
@@ -54,7 +55,7 @@ async def lifespan(app: FastAPI):
         await checkpointer.setup()
         logger.info("Compiling LangGraph graph…")
         app.state.graph = build_graph(checkpointer)
-        logger.info("BA Agent ready.")
+        logger.info("BA Agent ready (checkpoint pool max_size=20).")
         yield
     finally:
         await pool.close()
@@ -79,10 +80,21 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+# API key authentication (when BA_API_KEY is set in env)
+_api_key_header = APIKeyHeader(name="X-API-Key", auto_error=False)
+
+
+async def _verify_api_key(api_key: str | None = Depends(_api_key_header)):
+    if settings.ba_api_key and api_key != settings.ba_api_key:
+        raise HTTPException(status_code=401, detail="Invalid or missing API key")
+
+
+_auth = [Depends(_verify_api_key)]
+
 # Mount routers — paths match the n8n webhook paths the frontend already calls
-app.include_router(project_settings_router.router)
-app.include_router(session_router.router)
-app.include_router(teamwork_router.router)
+app.include_router(project_settings_router.router, dependencies=_auth)
+app.include_router(session_router.router, dependencies=_auth)
+app.include_router(teamwork_router.router, dependencies=_auth)
 
 
 @app.get("/health")

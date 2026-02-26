@@ -9,6 +9,7 @@ GET  /models           → list available LLM models
 """
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import uuid
@@ -21,6 +22,7 @@ from langchain_core.messages import HumanMessage
 from psycopg.rows import dict_row
 
 from app import database as db
+from app.config import settings
 from app.routers.project_settings import _blob_to_raw_url
 from app.graph.graph import build_graph, extract_finalize_args
 from app.graph.nodes import MODEL_REGISTRY, DEFAULT_MODEL
@@ -56,26 +58,53 @@ def _graph(request: Request):
     return request.app.state.graph
 
 
+# Limit concurrent agent runs to prevent resource exhaustion
+_agent_semaphore: asyncio.Semaphore | None = None
+
+
+def _get_semaphore() -> asyncio.Semaphore:
+    global _agent_semaphore
+    if _agent_semaphore is None:
+        _agent_semaphore = asyncio.Semaphore(settings.max_concurrent_agent_runs)
+    return _agent_semaphore
+
+
 def _make_config(session_id: str, model_id: str = DEFAULT_MODEL) -> dict:
     """LangGraph config for a session — thread_id drives checkpointing."""
-    return {"configurable": {"thread_id": session_id, "model_id": model_id}}
+    return {
+        "configurable": {"thread_id": session_id, "model_id": model_id},
+        "recursion_limit": 25,
+    }
 
 
 async def _fetch_constitution_content(blob_url: str) -> str | None:
-    """Download the raw markdown content of a constitution file from GitHub."""
+    """Download the raw markdown content of a constitution file from GitHub.
+    Retries up to 3 times with exponential backoff on transient failures."""
     raw_url = _blob_to_raw_url(blob_url)
     if not raw_url:
         return None
-    try:
-        async with httpx.AsyncClient(timeout=15) as client:
-            r = await client.get(raw_url, follow_redirects=True)
-            if r.status_code == 200:
-                return r.text
-            logger.warning("Constitution fetch %s → %s", raw_url, r.status_code)
+    last_exc: Exception | None = None
+    for attempt in range(3):
+        try:
+            async with httpx.AsyncClient(timeout=15) as client:
+                r = await client.get(raw_url, follow_redirects=True)
+                if r.status_code == 200:
+                    return r.text
+                if r.status_code == 429 and attempt < 2:
+                    await asyncio.sleep(2.0 * (2 ** attempt))
+                    continue
+                logger.warning("Constitution fetch %s → %s", raw_url, r.status_code)
+                return None
+        except (httpx.TimeoutException, httpx.ConnectError) as exc:
+            last_exc = exc
+            if attempt < 2:
+                await asyncio.sleep(1.0 * (2 ** attempt))
+                continue
+        except Exception:
+            logger.warning("Failed to fetch constitution from %s", raw_url, exc_info=True)
             return None
-    except Exception:
-        logger.warning("Failed to fetch constitution from %s", raw_url, exc_info=True)
-        return None
+    logger.warning("Failed to fetch constitution from %s after 3 retries: %s", raw_url, last_exc)
+    return None
 
 
 def _db_row_to_session(row: dict) -> Session:
@@ -134,7 +163,19 @@ async def _run_agent_turn(
     if state_overrides:
         graph_input.update(state_overrides)
 
-    final_state: AgentState = await graph.ainvoke(graph_input, config)
+    async with _get_semaphore():
+        try:
+            async with asyncio.timeout(settings.agent_timeout_seconds):
+                final_state: AgentState = await graph.ainvoke(graph_input, config)
+        except TimeoutError:
+            logger.error(
+                "Agent timed out after %ds for session %s",
+                settings.agent_timeout_seconds, session_id,
+            )
+            raise HTTPException(
+                status_code=504,
+                detail=f"Agent timed out after {settings.agent_timeout_seconds}s. Please try again.",
+            )
 
     # Extract finalize_turn args from last AI message
     finalize_args = extract_finalize_args(final_state)

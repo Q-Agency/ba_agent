@@ -1,3 +1,4 @@
+from pydantic import field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -24,6 +25,23 @@ class Settings(BaseSettings):
 
     # CORS
     cors_origins: str = "http://localhost:5173,http://localhost:3000"
+
+    # Security
+    ba_api_key: str = ""  # If set, require X-API-Key header on all requests
+
+    # Agent limits
+    agent_timeout_seconds: int = 120
+    max_concurrent_agent_runs: int = 5
+
+    @field_validator("anthropic_api_key")
+    @classmethod
+    def validate_anthropic_key(cls, v: str) -> str:
+        if not v or len(v.strip()) < 10:
+            raise ValueError(
+                "ANTHROPIC_API_KEY is missing or too short. "
+                "Set a valid API key in .env"
+            )
+        return v.strip()
 
     @property
     def cors_origins_list(self) -> list[str]:

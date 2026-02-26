@@ -8,6 +8,7 @@ It is never executed; the graph routing detects it and terminates.
 """
 from __future__ import annotations
 
+import asyncio
 import base64
 import json
 from typing import Any, Literal
@@ -46,30 +47,42 @@ async def search_teamwork(task_id: str = "", query: str = "") -> str:
         })
 
     base = f"https://{settings.teamwork_domain}/projects/api/v3"
+    last_err: str = ""
 
-    async with httpx.AsyncClient(headers=_teamwork_headers(), timeout=15) as client:
+    for attempt in range(3):
         try:
-            # Fetch task
-            r = await client.get(f"{base}/tasks/{task_id}.json")
-            r.raise_for_status()
-            task = r.json().get("task", {})
+            async with httpx.AsyncClient(headers=_teamwork_headers(), timeout=15) as client:
+                r = await client.get(f"{base}/tasks/{task_id}.json")
+                r.raise_for_status()
+                task = r.json().get("task", {})
 
-            # Fetch comments
-            cr = await client.get(f"{base}/tasks/{task_id}/comments.json")
-            comments = cr.json().get("comments", []) if cr.is_success else []
+                cr = await client.get(f"{base}/tasks/{task_id}/comments.json")
+                comments = cr.json().get("comments", []) if cr.is_success else []
 
-            return json.dumps({
-                "id": task.get("id"),
-                "title": task.get("name"),
-                "description": task.get("description"),
-                "status": task.get("status"),
-                "comments": [
-                    {"author": c.get("author", {}).get("firstName"), "body": c.get("body")}
-                    for c in comments[:10]
-                ],
-            })
+                return json.dumps({
+                    "id": task.get("id"),
+                    "title": task.get("name"),
+                    "description": task.get("description"),
+                    "status": task.get("status"),
+                    "comments": [
+                        {"author": c.get("author", {}).get("firstName"), "body": c.get("body")}
+                        for c in comments[:10]
+                    ],
+                })
+        except (httpx.TimeoutException, httpx.ConnectError) as exc:
+            last_err = str(exc)
+            if attempt < 2:
+                await asyncio.sleep(1.0 * (2 ** attempt))
+                continue
+        except httpx.HTTPStatusError as exc:
+            if exc.response.status_code == 429 and attempt < 2:
+                await asyncio.sleep(2.0 * (2 ** attempt))
+                continue
+            return json.dumps({"error": str(exc)})
         except Exception as e:
             return json.dumps({"error": str(e)})
+
+    return json.dumps({"error": f"Teamwork API unreachable after 3 retries: {last_err}"})
 
 
 # ---------------------------------------------------------------------------
