@@ -18,6 +18,7 @@ from typing import Any
 
 import httpx
 from fastapi import APIRouter, HTTPException, Request
+from fastapi.responses import StreamingResponse
 from langchain_core.messages import HumanMessage
 from psycopg.rows import dict_row
 
@@ -486,6 +487,354 @@ async def send_message(body: SendMessageRequest, request: Request):
     return SessionWithMessages(
         session=_db_row_to_session(updated_row),
         messages=messages,
+    )
+
+
+# ---------------------------------------------------------------------------
+# POST /session/message/stream  (SSE)
+# ---------------------------------------------------------------------------
+
+
+def _sse_event(event: str, data: dict) -> str:
+    """Format a single SSE event block."""
+    return f"event: {event}\ndata: {json.dumps(data, default=str)}\n\n"
+
+
+def _extract_ft_streaming_text(partial_json: str, offset: int) -> tuple[str, int]:
+    """Incrementally extract the first text `content` value from a partial finalize_turn JSON.
+
+    The finalize_turn args look like:
+      {"messages": [{"content_type": "text", "content": "THE RESPONSE...", ...}], ...}
+
+    We scan for the literal sequence ``"content": "`` and decode the JSON string
+    that follows it, returning only the newly available characters (after *offset*).
+
+    Returns:
+        (new_text, new_offset)  — new_text is the freshly available decoded text;
+        new_offset is the updated position within the content value string.
+    """
+    marker = '"content": "'
+    pos = partial_json.find(marker)
+    if pos == -1:
+        return "", offset
+    content_start = pos + len(marker)
+    available = partial_json[content_start + offset:]
+    chars: list[str] = []
+    i = 0
+    while i < len(available):
+        c = available[i]
+        if c == "\\":
+            if i + 1 >= len(available):
+                break  # incomplete escape — safe to stop and retry later
+            n = available[i + 1]
+            if n == "n":
+                chars.append("\n"); i += 2
+            elif n == "t":
+                chars.append("\t"); i += 2
+            elif n == "r":
+                chars.append("\r"); i += 2
+            elif n == '"':
+                chars.append('"'); i += 2
+            elif n == "\\":
+                chars.append("\\"); i += 2
+            elif n == "u":
+                if i + 5 < len(available):
+                    try:
+                        chars.append(chr(int(available[i + 2:i + 6], 16)))
+                        i += 6
+                    except ValueError:
+                        break  # bad unicode — stop
+                else:
+                    break  # incomplete \uXXXX — stop and retry later
+            else:
+                break  # unknown escape — stop
+        elif c == '"':
+            break  # end of JSON string — content fully received
+        else:
+            chars.append(c)
+            i += 1
+    new_text = "".join(chars)
+    new_offset = offset + i
+    return new_text, new_offset
+
+
+@router.post("/session/message/stream")
+async def stream_message(body: SendMessageRequest, request: Request):
+    """
+    SSE streaming variant of POST /session/message.
+
+    Emits real-time step events while the LangGraph agent runs, then a final
+    'done' event containing the complete SessionWithMessages payload.
+
+    Event types:
+      step  → {"type": "thinking"|"tool_call"|"tool_done", "label": str, ...}
+      token → {"text": str}  (LLM text delta, emitted per token)
+      done  → {"session": {...}, "messages": [...]}
+      error → {"message": str}
+    """
+    session_row = await db.get_session(body.sessionId)
+    if session_row is None:
+        async def _not_found():
+            yield _sse_event("error", {"message": "Session not found"})
+        return StreamingResponse(_not_found(), media_type="text/event-stream")
+
+    if session_row.get("status") == "approved":
+        async def _approved():
+            yield _sse_event("error", {"message": "Session is approved. Use /session/review to request changes."})
+        return StreamingResponse(_approved(), media_type="text/event-stream")
+
+    graph = _graph(request)
+
+    async def event_generator():
+        # 1. Persist BA message immediately (same order as send_message)
+        await db.insert_message(
+            session_id=body.sessionId,
+            role="ba",
+            content_type="text",
+            content=body.content,
+        )
+
+        # 2. Build graph input (mirrors send_message)
+        user_msg = HumanMessage(content=body.content)
+        db_completeness = session_row.get("completeness") or DEFAULT_COMPLETENESS
+        if isinstance(db_completeness, str):
+            db_completeness = json.loads(db_completeness)
+
+        graph_input: dict = {
+            "messages": [user_msg],
+            "completeness": dict(db_completeness),
+            "spec_md": session_row.get("spec_md"),
+        }
+        config = _make_config(body.sessionId, body.model or DEFAULT_MODEL)
+
+        # 3. Stream events from the graph — also capture the last AIMessage
+        #    for finalize_turn extraction (more reliable than aget_state).
+        iteration_counter = 0
+        last_ai_message = None  # captured from on_chat_model_end events
+        ft_partial_json = ""   # accumulated partial args JSON for finalize_turn
+        ft_content_emitted = 0  # chars of content field already emitted as tokens
+        try:
+            async with _get_semaphore():
+                async with asyncio.timeout(settings.agent_timeout_seconds):
+                    async for event in graph.astream_events(graph_input, config, version="v2"):
+                        kind = event.get("event", "")
+                        name = event.get("name", "")
+                        data = event.get("data", {})
+
+                        if kind == "on_chat_model_start":
+                            iteration_counter += 1
+                            label = (
+                                "Analyzing your request..."
+                                if iteration_counter == 1
+                                else "Formulating response..."
+                            )
+                            yield _sse_event("step", {
+                                "type": "thinking",
+                                "label": label,
+                                "iteration": iteration_counter,
+                            })
+
+                        elif kind == "on_chat_model_stream":
+                            chunk = data.get("chunk")
+                            if chunk is not None:
+                                # --- Plain text content (rare for tool-heavy agents) ---
+                                chunk_content = getattr(chunk, "content", None)
+                                if isinstance(chunk_content, str) and chunk_content:
+                                    yield _sse_event("token", {"text": chunk_content})
+                                elif isinstance(chunk_content, list):
+                                    for block in chunk_content:
+                                        if isinstance(block, dict) and block.get("type") == "text":
+                                            text_delta = block.get("text", "")
+                                            if text_delta:
+                                                yield _sse_event("token", {"text": text_delta})
+                                        elif isinstance(block, str) and block:
+                                            yield _sse_event("token", {"text": block})
+
+                                # --- finalize_turn tool input streaming ---
+                                # Claude delivers responses through tool_call_chunks whose
+                                # `args` field accumulates the partial JSON for finalize_turn.
+                                # We extract the first text message's `content` value as it
+                                # streams so the frontend can show a live response preview.
+                                for tc in getattr(chunk, "tool_call_chunks", None) or []:
+                                    args_delta = tc.get("args") or ""
+                                    if not args_delta:
+                                        continue
+                                    if tc.get("name") == "finalize_turn" or ft_partial_json:
+                                        ft_partial_json += args_delta
+                                        new_text, ft_content_emitted = _extract_ft_streaming_text(
+                                            ft_partial_json, ft_content_emitted
+                                        )
+                                        if new_text:
+                                            yield _sse_event("token", {"text": new_text})
+
+                        elif kind == "on_chat_model_end":
+                            # Capture each LLM output — the last one contains
+                            # finalize_turn (overwritten each iteration).
+                            output = data.get("output")
+                            if output is not None:
+                                last_ai_message = output
+
+                        elif kind == "on_tool_start" and name == "search_teamwork":
+                            args = data.get("input") or {}
+                            task_id = args.get("task_id", "") if isinstance(args, dict) else ""
+                            label = (
+                                f"Searching Teamwork for task {task_id}..."
+                                if task_id
+                                else "Searching Teamwork for task details..."
+                            )
+                            yield _sse_event("step", {
+                                "type": "tool_call",
+                                "tool": "search_teamwork",
+                                "label": label,
+                            })
+
+                        elif kind == "on_tool_end" and name == "search_teamwork":
+                            yield _sse_event("step", {
+                                "type": "tool_done",
+                                "tool": "search_teamwork",
+                                "label": "Found task information",
+                            })
+
+        except TimeoutError:
+            logger.error(
+                "Stream agent timed out after %ds for session %s",
+                settings.agent_timeout_seconds, body.sessionId,
+            )
+            yield _sse_event("error", {
+                "message": f"Agent timed out after {settings.agent_timeout_seconds}s. Please try again."
+            })
+            return
+        except Exception as exc:
+            logger.exception("Stream error for session %s: %s", body.sessionId, exc)
+            yield _sse_event("error", {"message": f"Agent error: {exc}"})
+            return
+
+        # 4. Extract finalize_turn from captured AIMessage (primary) or checkpoint (fallback)
+        try:
+            final_state: dict = {}  # populated from checkpoint if available
+            finalize_args = None
+            if last_ai_message is not None:
+                for tc in (getattr(last_ai_message, "tool_calls", None) or []):
+                    if tc.get("name") == "finalize_turn":
+                        finalize_args = tc.get("args")
+                        break
+
+            # Fallback: try checkpoint state if captured AIMessage didn't have it
+            if finalize_args is None:
+                try:
+                    checkpoint_state = await graph.aget_state(config)
+                    final_state = checkpoint_state.values
+                    finalize_args = extract_finalize_args(final_state)
+                except Exception as chk_err:
+                    logger.warning("Could not read checkpoint state: %s", chk_err)
+                    final_state = {}
+
+            if finalize_args is None:
+                # Last resort: plain text from captured AIMessage or checkpoint
+                text = ""
+                if last_ai_message is not None:
+                    raw_content = getattr(last_ai_message, "content", "")
+                    # Anthropic models may return content as a list of blocks
+                    if isinstance(raw_content, list):
+                        text = " ".join(
+                            block.get("text", "") if isinstance(block, dict) else str(block)
+                            for block in raw_content
+                        )
+                    else:
+                        text = str(raw_content) if raw_content else ""
+                logger.info("Stream: model did not call finalize_turn — plain text fallback (text length=%d)", len(text))
+                finalize_args = {
+                    "messages": [{"content_type": "text", "content": text, "citations": []}],
+                    "completeness": None,
+                    "decisions": [],
+                    "spec_md": None,
+                }
+            else:
+                logger.info("Stream finalize_turn args: %s", json.dumps(finalize_args, default=str)[:2000])
+
+            raw_messages = finalize_args.get("messages", [])
+            new_completeness = finalize_args.get("completeness")
+            spec_md = finalize_args.get("spec_md")
+
+            # Normalise types (same as _run_agent_turn)
+            if isinstance(raw_messages, str):
+                try:
+                    raw_messages = json.loads(raw_messages)
+                except (json.JSONDecodeError, TypeError):
+                    raw_messages = [{"content_type": "text", "content": raw_messages, "citations": []}]
+            if isinstance(spec_md, str):
+                if spec_md.startswith(("{", '"')):
+                    try:
+                        parsed = json.loads(spec_md)
+                        if isinstance(parsed, str):
+                            spec_md = parsed
+                    except (json.JSONDecodeError, TypeError):
+                        pass
+                if isinstance(spec_md, str) and "\\n" in spec_md:
+                    spec_md = spec_md.replace("\\n", "\n")
+            if isinstance(new_completeness, str):
+                try:
+                    new_completeness = json.loads(new_completeness)
+                except (json.JSONDecodeError, TypeError):
+                    new_completeness = None
+
+            # final_state may be empty if checkpoint read failed; fall back to DB values
+            checkpoint_completeness = (
+                final_state.get("completeness") if final_state else None
+            ) or db_completeness
+            current_completeness = dict(checkpoint_completeness or DEFAULT_COMPLETENESS)
+            if isinstance(new_completeness, dict):
+                for key in current_completeness:
+                    if key in new_completeness:
+                        val = new_completeness[key]
+                        try:
+                            current_completeness[key] = max(0, min(100, int(val)))
+                        except (ValueError, TypeError):
+                            pass
+
+            if spec_md is None:
+                spec_md = (final_state.get("spec_md") if final_state else None) or session_row.get("spec_md")
+
+            # 5. Persist agent messages
+            messages = await _persist_agent_messages(body.sessionId, raw_messages)
+
+            # 6. Status transition (same logic as send_message)
+            current_status = session_row.get("status", "in_progress")
+            new_status: str | None = None
+            if all(v >= 80 for v in current_completeness.values()):
+                if current_status == "in_progress":
+                    new_status = "spec_ready"
+            else:
+                if current_status == "spec_ready":
+                    new_status = "in_progress"
+
+            await db.update_session(
+                body.sessionId,
+                completeness=current_completeness,
+                spec_md=spec_md,
+                status=new_status,
+            )
+
+            # 7. Emit done event with full payload
+            updated_row = await db.get_session(body.sessionId)
+            session_obj = _db_row_to_session(updated_row)
+            yield _sse_event("done", {
+                "session": session_obj.model_dump(),
+                "messages": [m.model_dump() for m in messages],
+            })
+
+        except Exception as exc:
+            logger.exception("Post-stream persistence error for session %s: %s", body.sessionId, exc)
+            yield _sse_event("error", {"message": f"Failed to save agent response: {exc}"})
+
+    return StreamingResponse(
+        event_generator(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "X-Accel-Buffering": "no",
+            "Connection": "keep-alive",
+        },
     )
 
 
