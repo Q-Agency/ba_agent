@@ -77,10 +77,12 @@ class ReviewRequest(BaseModel):
     action: Literal["approve", "request_changes"]
     feedback: str | None = Field(default=None, max_length=50000)
     model: str = Field(default="claude-sonnet-4-6", max_length=100)
+    webhookMode: Literal["test", "prod"] = "test"
 
 
 class ResetSessionRequest(BaseModel):
     sessionId: str = Field(..., max_length=200)
+    webhookMode: Literal["test", "prod"] = "test"
 
 
 # ---------------------------------------------------------------------------
@@ -97,19 +99,10 @@ class MessagesResponse(BaseModel):
     messages: list[Message]
 
 
-class ApprovalStep(BaseModel):
-    id: str
-    label: str
-    status: Literal["success", "failed", "skipped"]
-    detail: str | None = None
-
-
 class ReviewResponse(BaseModel):
     status: Literal["approved", "revision_requested"]
     session: Session | None = None
     messages: list[Message] | None = None
-    pr_url: str | None = None
-    steps: list[ApprovalStep] | None = None
 
 
 class ModelInfo(BaseModel):

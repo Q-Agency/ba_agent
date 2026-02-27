@@ -27,7 +27,6 @@ from app.routers.project_settings import _blob_to_raw_url
 from app.graph.graph import build_graph, extract_finalize_args
 from app.graph.nodes import MODEL_REGISTRY, DEFAULT_MODEL
 from app.graph.state import DEFAULT_COMPLETENESS, AgentState
-from app.routers.teamwork import upload_spec_to_task, move_task_to_stage
 from app.schemas.api import (
     CompletenessMap,
     GetSessionRequest,
@@ -275,6 +274,36 @@ async def _persist_agent_messages(
 
 
 # ---------------------------------------------------------------------------
+# n8n webhook notification
+# ---------------------------------------------------------------------------
+
+
+async def _notify_n8n(event_path: str, payload: dict, webhook_mode: str = "test"):
+    """POST to n8n webhook. Raises on non-2xx so callers can propagate the failure."""
+    if not settings.n8n_base_url:
+        logger.info("n8n webhook skipped — N8N_BASE_URL not set")
+        return
+    prefix = "webhook-test" if webhook_mode == "test" else "webhook"
+    url = f"{settings.n8n_base_url}/{prefix}/{event_path}"
+    logger.info("n8n webhook POST %s  payload keys=%s", url, list(payload.keys()))
+    try:
+        async with httpx.AsyncClient(timeout=10) as client:
+            r = await client.post(url, json=payload)
+            logger.info("n8n webhook %s → %s  body=%s", url, r.status_code, r.text[:500])
+            if r.status_code >= 400:
+                raise HTTPException(
+                    status_code=502,
+                    detail=f"n8n webhook returned {r.status_code}",
+                )
+    except HTTPException:
+        raise
+    except Exception as exc:
+        logger.warning("n8n webhook failed (%s): %s", url, exc)
+        raise HTTPException(status_code=502, detail=f"n8n webhook unreachable: {exc}")
+        raise HTTPException(status_code=502, detail=f"n8n webhook failed: {exc}")
+
+
+# ---------------------------------------------------------------------------
 # GET /models
 # ---------------------------------------------------------------------------
 
@@ -493,126 +522,52 @@ async def review_session(body: ReviewRequest, request: Request):
         raise HTTPException(status_code=404, detail="Session not found")
 
     if body.action == "approve":
-        from app.services.github import create_spec_pr, parse_github_url
-        from app.schemas.api import ApprovalStep
-
-        tw_task_id = session_row.get("teamwork_task_id", "")
         spec_md = session_row.get("spec_md", "")
-        task_title = session_row.get("teamwork_task_title", "spec")
-
-        # ── Pre-flight checks ─────────────────────────────────────────
         if not spec_md:
             raise HTTPException(status_code=422, detail="Cannot approve: SPEC is empty.")
 
-        if not settings.github_token:
-            raise HTTPException(
-                status_code=422,
-                detail="Cannot approve: GITHUB_TOKEN is not configured on the server.",
-            )
-
+        # Prepare webhook payload before changing status
         project_id = session_row.get("project_id", "")
-        if not project_id:
-            raise HTTPException(
-                status_code=422,
-                detail="Cannot approve: session has no project_id. Try resetting and starting a new session.",
-            )
+        constitution_url = ""
+        if project_id:
+            ps = await db.get_project_settings(project_id)
+            constitution_url = (ps or {}).get("constitution_url", "")
+        completeness = session_row.get("completeness", {})
+        if isinstance(completeness, str):
+            completeness = json.loads(completeness)
 
-        settings_row = await db.get_project_settings(project_id)
-        constitution_url = (settings_row or {}).get("constitution_url", "")
-        repo_info = parse_github_url(constitution_url) if constitution_url else None
-        if not repo_info:
-            raise HTTPException(
-                status_code=422,
-                detail="Cannot approve: could not determine GitHub repo from constitution URL.",
-            )
+        tw_id = session_row.get("teamwork_task_id", "")
+        spec_file_name = f"SPEC-{tw_id}.md" if tw_id else "SPEC.md"
+        spec_file_size = len(spec_md.encode("utf-8"))
 
-        steps: list[ApprovalStep] = []
-        pr_url: str | None = None
-
-        # ── Step 1: GitHub PR (mandatory — blocks approval on failure) ─
-        try:
-            result = await create_spec_pr(
-                owner=repo_info["owner"],
-                repo=repo_info["repo"],
-                base_branch=repo_info["branch"],
-                teamwork_task_id=tw_task_id,
-                task_title=task_title,
-                spec_md=spec_md,
-                teamwork_domain=settings.teamwork_domain,
-            )
-            pr_url = result["pr_url"]
-            logger.info("Created GitHub PR for task %s: %s", tw_task_id, pr_url)
-            steps.append(ApprovalStep(
-                id="github_pr", label="Create GitHub Pull Request",
-                status="success", detail=pr_url,
-            ))
-        except Exception as exc:
-            logger.error("GitHub PR failed for task %s: %s", tw_task_id, exc)
-            steps.append(ApprovalStep(
-                id="github_pr", label="Create GitHub Pull Request",
-                status="failed", detail=str(exc),
-            ))
-            return ReviewResponse(
-                status="revision_requested",
-                session=_db_row_to_session(session_row),
-                steps=steps,
-            )
-
-        # ── Step 2: Mark session as approved ──────────────────────────
+        # Notify n8n BEFORE marking approved — if webhook fails the session
+        # stays in its previous state so the user can retry.
+        previous_status = session_row.get("status", "spec_ready")
         await db.update_session(body.sessionId, status="approved")
-        steps.append(ApprovalStep(
-            id="update_status", label="Mark session as approved",
-            status="success",
-        ))
-
-        # ── Step 3: Upload SPEC to Teamwork ───────────────────────────
-        if tw_task_id:
-            try:
-                await upload_spec_to_task(tw_task_id, spec_md, task_title)
-                logger.info("Uploaded SPEC to Teamwork task %s", tw_task_id)
-                steps.append(ApprovalStep(
-                    id="teamwork_upload", label="Upload SPEC to Teamwork",
-                    status="success",
-                ))
-            except Exception as exc:
-                logger.error("Failed to upload SPEC to Teamwork task %s: %s", tw_task_id, exc)
-                steps.append(ApprovalStep(
-                    id="teamwork_upload", label="Upload SPEC to Teamwork",
-                    status="failed", detail=str(exc),
-                ))
-        else:
-            steps.append(ApprovalStep(
-                id="teamwork_upload", label="Upload SPEC to Teamwork",
-                status="skipped", detail="No Teamwork task ID",
-            ))
-
-        # ── Step 4: Move Teamwork task to Ready for Design ────────────
-        if tw_task_id:
-            try:
-                await move_task_to_stage(tw_task_id)
-                logger.info("Moved Teamwork task %s to Ready for Design", tw_task_id)
-                steps.append(ApprovalStep(
-                    id="teamwork_move", label="Move task to Ready for Design",
-                    status="success",
-                ))
-            except Exception as exc:
-                logger.error("Failed to move Teamwork task %s: %s", tw_task_id, exc)
-                steps.append(ApprovalStep(
-                    id="teamwork_move", label="Move task to Ready for Design",
-                    status="failed", detail=str(exc),
-                ))
-        else:
-            steps.append(ApprovalStep(
-                id="teamwork_move", label="Move task to Ready for Design",
-                status="skipped", detail="No Teamwork task ID",
-            ))
+        try:
+            await _notify_n8n(settings.n8n_spec_approved_path, {
+                "session_id": body.sessionId,
+                "teamwork_task_id": tw_id,
+                "task_title": session_row.get("teamwork_task_title", ""),
+                "spec_md": spec_md,
+                "spec_file_name": spec_file_name,
+                "spec_file_size": spec_file_size,
+                "project_id": project_id,
+                "project_name": session_row.get("project_name", ""),
+                "constitution_url": constitution_url,
+                "approved_by": session_row.get("created_by", ""),
+                "approved_at": datetime.now(timezone.utc).isoformat(),
+                "completeness": completeness,
+            }, webhook_mode=body.webhookMode)
+        except HTTPException:
+            # Revert approval so the user can retry
+            await db.update_session(body.sessionId, status=previous_status)
+            raise
 
         updated_row = await db.get_session(body.sessionId)
         return ReviewResponse(
             status="approved",
             session=_db_row_to_session(updated_row),
-            pr_url=pr_url,
-            steps=steps,
         )
 
     # request_changes — feed feedback back into agent
@@ -664,6 +619,14 @@ async def reset_session(body: ResetSessionRequest):
         raise HTTPException(status_code=404, detail="Session not found")
 
     tw_id = session_row.get("teamwork_task_id", "")
+    task_title = session_row.get("teamwork_task_title", "")
+    project_id = session_row.get("project_id", "")
+
+    # Gather constitution_url before deleting (needed for n8n webhook)
+    constitution_url = ""
+    if project_id:
+        ps = await db.get_project_settings(project_id)
+        constitution_url = (ps or {}).get("constitution_url", "")
 
     # Find all session IDs for this teamwork task (there may be stale ones)
     all_session_ids = [body.sessionId]
@@ -676,6 +639,14 @@ async def reset_session(body: ResetSessionRequest):
                     (tw_id,),
                 )
                 all_session_ids = [r["id"] for r in await cur.fetchall()]
+
+    # Notify n8n orchestrator BEFORE deleting — if it fails the session
+    # stays intact so the user can retry.
+    await _notify_n8n(settings.n8n_spec_reset_path, {
+        "teamwork_task_id": tw_id,
+        "task_title": task_title,
+        "constitution_url": constitution_url,
+    }, webhook_mode=body.webhookMode)
 
     # Best-effort cleanup of LangGraph checkpoint tables for ALL sessions
     pool = await db.get_pool()

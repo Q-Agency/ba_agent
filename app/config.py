@@ -23,8 +23,13 @@ class Settings(BaseSettings):
     teamwork_api_key: str = ""
     teamwork_domain: str = ""  # e.g. "yourcompany.teamwork.com"
 
-    # GitHub (optional — for committing SPEC.md as PR on approval)
+    # GitHub (optional — for constitution URL validation)
     github_token: str = ""
+
+    # n8n orchestrator webhooks (optional — fires after approve/reset)
+    n8n_base_url: str = ""  # e.g. "https://infinite-wasp-terminally.ngrok-free.app"
+    n8n_spec_approved_path: str = "spec-approved"
+    n8n_spec_reset_path: str = "spec-reset"
 
     # CORS
     cors_origins: str = "http://localhost:5173,http://localhost:3000"
