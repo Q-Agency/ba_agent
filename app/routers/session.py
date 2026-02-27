@@ -300,7 +300,6 @@ async def _notify_n8n(event_path: str, payload: dict, webhook_mode: str = "test"
     except Exception as exc:
         logger.warning("n8n webhook failed (%s): %s", url, exc)
         raise HTTPException(status_code=502, detail=f"n8n webhook unreachable: {exc}")
-        raise HTTPException(status_code=502, detail=f"n8n webhook failed: {exc}")
 
 
 # ---------------------------------------------------------------------------
